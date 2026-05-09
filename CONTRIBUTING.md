@@ -82,6 +82,54 @@ note is shown next to the model in `worklist.md` so reviewers know to give
 those findings extra scrutiny. The dictionary ships empty — populate it from
 your own observations.
 
+## Tune the clustering and judge prompts
+
+The optional `llm_judge.py` script delegates the methodology decisions to
+two prompt files, both of which ship with TODO blocks you should fill in
+before relying on the output:
+
+- `prompts/cluster.en.txt` — what counts as "the same problem"; how to
+  pick `consensus_severity` when models disagree; whether to keep
+  singletons or drop them. Replace the `<!-- TODO ... -->` block with 5–10
+  lines of explicit rules drawn from your own runs.
+- `prompts/judge.en.txt` — the bar for `real / smell / nit / wrong`, and
+  when to mark `Confidence: low`. Same shape: replace the TODO block.
+
+The placeholders the runner fills in are documented at the top of each
+template. **Do not change the placeholder names** unless you also adjust
+`llm_judge.py` (it passes them by string replacement, not `.format()`).
+
+When you want to compare judges, override the model:
+
+```bash
+python llm_judge.py adjudicate --judge-model anthropic/claude-opus-4 ... -o verdicts.opus.md
+python llm_judge.py adjudicate --judge-model openai/gpt-5.5         ... -o verdicts.gpt55.md
+```
+
+Cross-judge agreement is one of the more useful sanity checks for the
+methodology — if two strong judges disagree on a cluster, that's a
+high-attention case for the human reviewer.
+
+## Customise the findings report template
+
+`compute_metrics.py --report` substitutes data into
+`templates/findings_report.template.md`. The placeholders are simple
+`{TOKEN}` strings; the data side is rendered by `render_findings_report`
+in `compute_metrics.py`.
+
+To add a new auto-filled section: add a `{TOKEN}` to the template, and add
+the corresponding entry to the `substitutions` dict in
+`render_findings_report`. To add a new data computation, write a small
+helper next to the existing ones (`_real_bugs_table`,
+`_per_model_real_table`, etc.) — they all take `clusters`, `issues`,
+`verdicts` (and optionally `metrics`/`cost_data`) and return a Markdown
+fragment.
+
+To use a different report shape entirely, point `--report-template` at
+your own file. The template is just Markdown with `{TOKEN}` placeholders;
+unrecognised placeholders are left as-is, so you can iterate without
+touching the script.
+
 ## Filing issues / PRs
 
 - One issue per topic, with a minimal repro (a small `input.diff` and the

@@ -39,7 +39,8 @@ precision / recall / hallucination rate.
         ↓
    findings.json
         ↓
-3. Claude в текущем чате        ← кластеризация, сохраняет clusters.json
+3. Claude в чате (по умолчанию) ← кластеризация → clusters.json
+   или llm_judge.py cluster     ← (alt: судья через OpenRouter)
         ↓
    clusters.json
         ↓
@@ -47,25 +48,35 @@ precision / recall / hallucination rate.
         ↓
    worklist.md
         ↓
-5. Claude в текущем чате        ← вердикт по каждому кластеру: real/smell/nit/wrong
+5. Claude в чате (по умолчанию) ← черновики вердиктов
+   или llm_judge.py adjudicate  ← (alt: судья через OpenRouter → verdicts.draft.md)
         ↓
-   verdicts.md
+   verdicts.md  (после человеческого ревью)
         ↓
-6. compute_metrics.py           ← метрики per-model + лидерборд (без LLM)
+6. compute_metrics.py           ← метрики + лидерборд (+ опц. отчёт)
         ↓
    worklist_judged.md + leaderboard.md
+   (+ findings_report.md если --report)
 ```
 
-**Принцип:** Python-скрипты не делают LLM-вызовов. Всё, что требует
-рассуждения (кластеризация, суждение), делает Claude в текущем чате — обычно
-бесплатно по подписке. OpenRouter тратится только на шаге 1, где гоняются
-сторонние модели.
+**Принцип:** основные Python-скрипты (парсинг, рендеринг, метрики) LLM не
+зовут. Всё, что требует рассуждения (кластеризация, суждение), делает Claude
+в текущем чате — обычно бесплатно по подписке. OpenRouter тратится только на
+шаге 1, где гоняются сторонние модели.
+
+Для пользователей без Claude Code есть опциональный скрипт `llm_judge.py`,
+который делает шаги кластеризации и судейства через OpenRouter с
+настраиваемой моделью-судьёй. Output — **черновик** (`verdicts.draft.md`),
+который человек всё равно вычитывает и утверждает перед метриками. См.
+[Опционально: автоматические черновики через OpenRouter](#опционально-автоматические-черновики-через-openrouter).
 
 ## Установка
 
 ```bash
 pip install -r requirements.txt
 ```
+
+API-ключ OpenRouter получить тут: <https://openrouter.ai/keys>. Затем:
 
 ```powershell
 $env:OPENROUTER_API_KEY = "..."   # PowerShell
@@ -118,7 +129,7 @@ python aggregate_findings.py parse \
   -o findings.json
 ```
 
-### 4. Кластеризация (Claude в чате)
+### 4. Кластеризация (Claude в чате или `llm_judge.py cluster`)
 
 Я (Claude) читаю `findings.json`, группирую находки по сути проблемы,
 сохраняю в `clusters.json`:
@@ -131,6 +142,20 @@ python aggregate_findings.py parse \
 }
 ```
 
+Рецепт для Claude в чате: открой Claude Code в папке прогона и попроси:
+> Прочитай `findings.json`. Сгруппируй находки по сути проблемы (используй
+> `prompts/cluster.en.txt` как рубрику). Запиши результат в `clusters.json`
+> в схеме оттуда же.
+
+Альтернатива — автоматический путь:
+
+```bash
+python llm_judge.py cluster \
+  --findings runs/<id>/findings.json \
+  -o runs/<id>/clusters.json \
+  --judge-model openai/gpt-5.5
+```
+
 ### 5. Рендер worklist'а
 
 ```bash
@@ -140,10 +165,10 @@ python aggregate_findings.py render \
   -o worklist.md
 ```
 
-### 6. Судейство (Claude в чате)
+### 6. Судейство (Claude в чате или `llm_judge.py adjudicate`)
 
-Я (Claude) для КАЖДОГО кластера читаю исходный код в указанном месте и
-выношу вердикт `real | smell | nit | wrong` с обоснованием. Результат —
+Для КАЖДОГО кластера ревьюер читает исходный код в указанном месте и
+выносит вердикт `real | smell | nit | wrong` с обоснованием. Результат —
 `verdicts.md`:
 
 ```
@@ -155,6 +180,32 @@ python aggregate_findings.py render \
 ## Cluster 2
 ...
 ```
+
+**Финальный вердикт за человеком.** Оба пути ниже выдают черновик —
+вычитай и переопредели несогласия перед сохранением как `verdicts.md`.
+
+Рецепт для Claude в чате: открой Claude Code в папке прогона, скорми
+`worklist.md`, и попроси:
+> Для каждого кластера в `worklist.md` прочитай исходный код по указанному
+> `Location:` и вынеси вердикт по рубрике из `prompts/judge.en.txt`. Запиши
+> результат в `verdicts.md` в схеме оттуда же.
+
+Альтернатива — автоматический путь (выдаёт `verdicts.draft.md`, который
+вычитывается и переименовывается в `verdicts.md`):
+
+```bash
+python llm_judge.py adjudicate \
+  --clusters runs/<id>/clusters.json \
+  --findings runs/<id>/findings.json \
+  --repo-path /path/to/repo \
+  --context-lines 50 \
+  -o runs/<id>/verdicts.draft.md \
+  --judge-model openai/gpt-5.5
+```
+
+В черновике сверху — преамбула «Needs human attention» с кластерами,
+которым нужно особое внимание: low-confidence решения, severity dissent
+(модели резко расходятся в severity), синглетоны (одна модель пометила).
 
 ### 7. Метрики
 
@@ -172,6 +223,69 @@ python compute_metrics.py \
   low-confidence кластеров)
 - `leaderboard.md` — таблица per-model метрик: precision, recall,
   hallucination rate, $/real
+
+### 8. (Опционально) Скелет нарративного отчёта
+
+Передай `--report runs/<id>/findings_report.md` в `compute_metrics.py` —
+скрипт срендерит нарративный отчёт со заполненными таблицами (real-баги,
+кто что нашёл, severity calibration, cost/value) и `<!-- TODO -->` блоками
+под прозу (комментарии к синглетонам, паттерны, методологический вывод).
+Шаблон лежит в `templates/findings_report.template.md`.
+
+```bash
+python compute_metrics.py \
+  --verdicts runs/<id>/verdicts.md \
+  --findings runs/<id>/findings.json \
+  --clusters runs/<id>/clusters.json \
+  --results  runs/<id>/results.json \
+  --leaderboard runs/<id>/leaderboard.md \
+  --report      runs/<id>/findings_report.md
+```
+
+Дальше ревьюер (ты или Claude-субагент в чате) дописывает прозу в
+`<!-- TODO -->` блоках. Это документ, который связывает прогон в единое
+повествование для статьи или внутренней рассылки команде.
+
+## Опционально: автоматические черновики через OpenRouter
+
+Дефолтный workflow использует Claude в чате для двух LLM-шагов
+(кластеризация, судейство). Для пользователей без Claude Code, или для
+исследований воспроизводимости (прогнать несколько судей и сравнить),
+есть опциональный `llm_judge.py`:
+
+```bash
+# Шаг 4 alt
+python llm_judge.py cluster \
+  --findings runs/<id>/findings.json \
+  -o runs/<id>/clusters.json \
+  --judge-model openai/gpt-5.5
+
+# Шаг 6 alt — выдаёт verdicts.draft.md, НЕ verdicts.md
+python llm_judge.py adjudicate \
+  --clusters runs/<id>/clusters.json \
+  --findings runs/<id>/findings.json \
+  --repo-path /path/to/repo \
+  --context-lines 50 \
+  -o runs/<id>/verdicts.draft.md \
+  --judge-model openai/gpt-5.5
+```
+
+Модель-судья и рубрика кластеризации — это не сама методика, они в
+`prompts/cluster.en.txt` и `prompts/judge.en.txt`. Подкрути их под свою
+кодбазу прежде чем полагаться на output.
+
+**Trade-offs, о которых надо помнить:**
+- LLM-as-judge известно подвержен биасам (position, length, self-preference).
+  Если судья — из той же семьи, что какая-то из моделей под судом, эта
+  модель получит небольшую фору. Для воспроизводимости — гонять несколько
+  судей.
+- Судья видит только ±N строк вокруг `Location:`, не весь файл и не его
+  callers. Для багов, чей вердикт зависит от инвариантов вызывающего кода,
+  судья (правильно) пометит `Confidence: low`, и человеку придётся идти в
+  callsite'ы.
+- Принцип «финальный вердикт за человеком» сохраняется: output называется
+  `verdicts.draft.md`, чтобы его нельзя было молча скормить в метрики. В
+  `verdicts.md` переименовываешь только после ревью.
 
 ## Категории судейства
 
@@ -213,11 +327,16 @@ ai-code-review-benchmark/
 ├── requirements.txt
 ├── code_review_benchmark.py        ← OpenRouter-раннер
 ├── aggregate_findings.py           ← парсер + рендерер worklist (без LLM)
-├── compute_metrics.py              ← метрики + лидерборд (без LLM)
+├── compute_metrics.py              ← метрики + лидерборд + отчёт (без LLM)
+├── llm_judge.py                    ← опционально: автоматические черновики кластеризации/судейства
 ├── models.json                     ← дефолтный список моделей (перебивается --models-file)
 ├── prompts/
-│   ├── review.en.txt               ← дефолтный шаблон промта
-│   └── review.ru.txt               ← пример с русским телом и английскими маркерами
+│   ├── review.en.txt               ← промт ревьюера (шаг 1)
+│   ├── review.ru.txt               ← пример с русским телом и английскими маркерами
+│   ├── cluster.en.txt              ← рубрика кластеризации (шаг 4 — для llm_judge или Claude в чате)
+│   └── judge.en.txt                ← рубрика судейства (шаг 6)
+├── templates/
+│   └── findings_report.template.md ← скелет для compute_metrics.py --report
 └── runs/                           ← в .gitignore — твои локальные прогоны
     └── <run-id>/                   ← один прогон = одна папка
         ├── input.diff              ← сам diff (для воспроизводимости)
@@ -225,11 +344,13 @@ ai-code-review-benchmark/
         ├── results/                ← per-model .md (OpenRouter)
         ├── results_claude_subagent/← per-model .md (Claude-субагенты)
         ├── findings.json           ← распарсенные находки
-        ├── clusters.json           ← кластеры от Claude
+        ├── clusters.json           ← кластеры (Claude в чате или llm_judge.py cluster)
         ├── worklist.md             ← worklist для разметки
-        ├── verdicts.md             ← вердикты по кластерам
+        ├── verdicts.draft.md       ← (опц.) черновик от llm_judge.py adjudicate
+        ├── verdicts.md             ← вердикты по кластерам (утверждённые человеком)
         ├── worklist_judged.md      ← worklist + вердикты merged
         ├── leaderboard.md          ← per-model метрики
+        ├── findings_report.md      ← (опц.) нарративный отчёт (--report)
         └── run.log                 ← stdout прогона
 ```
 
@@ -248,11 +369,15 @@ ai-code-review-benchmark/
 
 | Файл | Формат / что это | Кто создаёт |
 |---|---|---|
-| `code_review_benchmark.py` | Python — OpenRouter-раннер; зовёт LLM | этот репо |
+| `code_review_benchmark.py` | Python — OpenRouter-раннер; зовёт LLM (шаг 1) | этот репо |
 | `aggregate_findings.py` | Python — парсер + рендерер worklist'а; LLM не зовёт | этот репо |
-| `compute_metrics.py` | Python — метрики + лидерборд; LLM не зовёт | этот репо |
+| `compute_metrics.py` | Python — метрики + лидерборд + (опц.) findings_report; LLM не зовёт | этот репо |
+| `llm_judge.py` | Python — опционально; зовёт OpenRouter для шагов 4 и 6 | этот репо |
 | `models.json` | JSON — `{display_name: openrouter_model_id}`; ключи на `_` считаются комментариями | этот репо (перебивается `--models-file`) |
-| `prompts/review.en.txt` · `review.ru.txt` | Текстовый шаблон — плейсхолдеры `{diff}` и `{context_block}` | этот репо (перебивается `--prompt`) |
+| `prompts/review.en.txt` · `review.ru.txt` | Промт шага 1; плейсхолдеры `{diff}` и `{context_block}` | этот репо (перебивается `--prompt`) |
+| `prompts/cluster.en.txt` | Рубрика шага 4; плейсхолдер `{findings_block}`. Заполни TODO-блок своими правилами кластеризации. | этот репо |
+| `prompts/judge.en.txt` | Рубрика шага 6; плейсхолдеры `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Заполни TODO-блок своими критериями вердиктов. | этот репо |
+| `templates/findings_report.template.md` | Markdown-скелет с `{TOKEN}` плейсхолдерами под автозаполнение и `<!-- TODO -->` блоками под человеческую прозу | этот репо (перебивается `--report-template`) |
 
 ### Артефакты прогона (внутри `runs/<run-id>/`)
 
@@ -265,11 +390,13 @@ ai-code-review-benchmark/
 | `results/<model>.md` | Markdown — блок `Findings:` с пронумерованными пунктами: `N) [severity: blocker\|major\|minor\|nit] summary` и подпунктами `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
 | `results_claude_subagent/<model>.md` | Markdown — тот же формат | Claude-субагенты (запускаются из чата вручную) |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
-| `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx в issues[]>]}] }` | Claude в чате (одноразово) |
+| `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx в issues[]>]}] }` | Claude в чате — или `llm_judge.py cluster` |
 | `worklist.md` | Markdown — кластеры с `[ ]`-чекбоксами (`real` / `smell` / `nit` / `wrong`), готовые к разметке | `aggregate_findings.py render` |
-| `verdicts.md` | Markdown — на каждый кластер: `## Cluster N` и строки `- Verdict:`, `- Confidence:`, `- Reason:` | Claude в чате (судейство с чтением исходников) |
+| `verdicts.draft.md` | Markdown — та же схема что `verdicts.md` плюс преамбула «Needs human attention». **Опционально**, для ревью — после редактирования переименовываешь в `verdicts.md`. | `llm_judge.py adjudicate` |
+| `verdicts.md` | Markdown — на каждый кластер: `## Cluster N` и строки `- Verdict:`, `- Confidence:`, `- Reason:` | Claude в чате (судейство с чтением исходников) — или человеческое ревью `verdicts.draft.md` |
 | `worklist_judged.md` | Markdown — `worklist.md` с проставленными `[x]` и заметками судьи | `compute_metrics.py` |
 | `leaderboard.md` | Markdown — per-model precision / recall / hallucination rate / $/real | `compute_metrics.py` |
+| `findings_report.md` | Markdown — нарративный отчёт со заполненными таблицами (real-баги, кто что нашёл, severity calibration, cost/value) и `<!-- TODO -->` блоками под прозу | `compute_metrics.py --report` (затем человеческая проза) |
 | `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind: "actual"\|"estimated"\|"estimated_anthropic"} }` (опционально, нужен для `$/real`) | пользователь (вручную; из OpenRouter dashboard или публичных тарифов) |
 | `run.log` | Plain text — stdout шага 1 | `code_review_benchmark.py` (через redirect) |
 

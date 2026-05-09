@@ -46,3 +46,6 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
+
+# MCP server local state (Serena, etc.)
+.serena/

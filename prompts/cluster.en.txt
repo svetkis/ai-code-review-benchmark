@@ -1,0 +1,47 @@
+You are clustering code-review findings produced by multiple LLM reviewers
+on the same diff. Group findings that describe the same underlying problem
+into a single cluster.
+
+<!--
+TODO (methodology owner): replace this block with 5–10 lines of explicit
+clustering rules. The defaults below are a sensible starting point; tune them
+based on the kinds of findings you see in your runs.
+
+Suggested decisions to make explicit:
+  - What counts as "the same problem"? Same code location? Same root cause
+    even if cited at different lines? Same suggested fix?
+  - When two findings cite different lines but describe the same bug, are
+    they one cluster (because root cause is shared) or two (because fixes
+    differ)?
+  - When findings inside a cluster disagree on severity (one says blocker,
+    one says nit), what `consensus_severity` do you assign? Median? Max?
+    Most-common? A weighted vote?
+  - When a finding is unique (one model only) and clearly off-topic, do you
+    cluster it as a singleton, or drop it? (Recommendation: keep singletons
+    — they often reveal what one model uniquely caught or fabricated.)
+  - When a finding has no `location` field, can it still be clustered?
+-->
+
+Input — findings indexed from 0:
+{findings_block}
+
+Output a single JSON object, no prose before or after:
+
+```json
+{
+  "clusters": [
+    {
+      "id": 1,
+      "topic": "<short, problem-focused summary>",
+      "consensus_severity": "blocker" | "major" | "minor" | "nit",
+      "members": [<int indices into the input list>]
+    }
+  ]
+}
+```
+
+Constraints:
+  - Every input index must appear in exactly one cluster.
+  - Cluster `id`s are 1-based integers, contiguous, in output order.
+  - Sort clusters by severity (blocker → nit), then by member count desc.
+  - Singletons (one-member clusters) are allowed and expected.

@@ -1,0 +1,49 @@
+You are drafting a verdict for one cluster of code-review findings. A human
+reviewer will read your draft and either accept it or override — so be
+explicit about your confidence and reasoning. Do not hedge: pick a verdict.
+
+<!--
+TODO (methodology owner): replace this block with 5–10 lines of explicit
+verdict criteria. Without sharp criteria the draft will be inconsistent across
+clusters, and the human reviewer ends up redoing the work.
+
+Suggested decisions to make explicit:
+  - real:  what bar does a finding clear to count as a real bug? Crash on
+           realistic input? Wrong result on typical data? Anything that would
+           appear in a post-mortem?
+  - smell: code-health issues that won't break in production — duplication,
+           bad names, missing docs, asymmetric APIs. Be explicit about the
+           boundary with `real`.
+  - nit:   pure style — whitespace, idiomatic preference, micro-opt.
+  - wrong: the model is mistaken — issue doesn't exist, code was misread,
+           suggestion doesn't apply.
+
+  - When do you mark `Confidence: low`?
+      - Default low if you can't see the source (`source_excerpt` is empty
+        or marked unavailable).
+      - Low if the code is genuinely ambiguous and a human needs to check
+        callers / runtime behaviour / tests.
+      - Otherwise medium or high.
+  - Tie-breakers (used in the original methodology):
+      - real / smell        → smell
+      - smell / nit         → nit
+      - smell / wrong       → re-read, default smell
+-->
+
+Cluster id:                 {cluster_id}
+Cluster topic:              {cluster_topic}
+Cluster severity (models):  {cluster_severity}
+Source availability:        {source_status}
+
+Findings from models in this cluster:
+{cluster_findings}
+
+Source excerpt at the cited location:
+{source_excerpt}
+
+Output exactly this format, with no prose before or after:
+
+## Cluster {cluster_id}
+- Verdict: real | smell | nit | wrong
+- Confidence: high | medium | low
+- Reason: <one or two concrete sentences. Reference the code if you read it.>

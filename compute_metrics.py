@@ -214,6 +214,192 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     output.write_text("\n".join(out), encoding='utf-8')
 
 
+# ── Findings report ────────────────────────────────────────────────────────
+
+DEFAULT_REPORT_TEMPLATE = (
+    Path(__file__).parent / "templates" / "findings_report.template.md"
+)
+
+
+def _location_short(s: str | None, limit: int = 80) -> str:
+    if not s:
+        return ""
+    s = s.strip().replace("\n", " ").replace("`", "'")
+    return s[:limit] + ("..." if len(s) > limit else "")
+
+
+def _real_bugs_table(clusters: list[dict], issues: list[dict],
+                      verdicts: dict[int, dict], models_total: int) -> str:
+    rows = []
+    for c in clusters:
+        v = verdicts.get(c["id"])
+        if not v or v["verdict"] != "real":
+            continue
+        members = [issues[i] for i in c["members"] if 0 <= i < len(issues)]
+        coverage = len({m["model"] for m in members})
+        location = max((m.get("location") or "" for m in members), key=len, default="")
+        rows.append((c["id"], c["topic"], _location_short(location),
+                     c.get("consensus_severity", "?"),
+                     f"{coverage}/{models_total}"))
+    if not rows:
+        return "_No real bugs in this run._"
+    out = ["| # | Topic | Location | Severity (consensus) | Coverage |",
+           "|---|---|---|---|---:|"]
+    for cid, topic, loc, sev, cov in rows:
+        out.append(f"| **#{cid}** | {topic} | `{loc}` | {sev} | {cov} |")
+    return "\n".join(out)
+
+
+def _per_model_real_table(clusters: list[dict], issues: list[dict],
+                            verdicts: dict[int, dict]) -> str:
+    real_clusters = [c for c in clusters
+                     if verdicts.get(c["id"], {}).get("verdict") == "real"]
+    if not real_clusters:
+        return "_No real bugs to attribute._"
+    real_clusters.sort(key=lambda c: c["id"])
+
+    all_models = sorted({i["model"] for i in issues})
+    cluster_models = {c["id"]: {issues[i]["model"] for i in c["members"]
+                                  if 0 <= i < len(issues)}
+                       for c in real_clusters}
+
+    header = "| Model | " + " | ".join(f"#{c['id']}" for c in real_clusters) + " | Total real |"
+    sep = "|---|" + ":-:|" * len(real_clusters) + "---:|"
+    body = []
+    for m in all_models:
+        cells = ["✓" if m in cluster_models[c["id"]] else "" for c in real_clusters]
+        total = sum(1 for c in real_clusters if m in cluster_models[c["id"]])
+        body.append((total, f"| {m} | " + " | ".join(cells) + f" | {total} |"))
+    body.sort(key=lambda x: -x[0])
+    return "\n".join([header, sep, *(row for _, row in body)])
+
+
+def _singleton_findings_list(clusters: list[dict], issues: list[dict],
+                               verdicts: dict[int, dict]) -> str:
+    rows = []
+    for c in clusters:
+        members = [issues[i] for i in c["members"] if 0 <= i < len(issues)]
+        unique_models = {m["model"] for m in members}
+        if len(unique_models) != 1:
+            continue
+        model = next(iter(unique_models))
+        v = verdicts.get(c["id"], {})
+        verdict = v.get("verdict", "?")
+        rows.append(f"- **#{c['id']}** — flagged only by **{model}** "
+                     f"(verdict: _{verdict}_): {c['topic']}")
+    if not rows:
+        return "_No singleton clusters in this run._"
+    return "\n".join(rows)
+
+
+def _severity_calibration_table(clusters: list[dict],
+                                  verdicts: dict[int, dict]) -> str:
+    severities = ["blocker", "major", "minor", "nit"]
+    cats = ["real", "smell", "nit", "wrong"]
+    grid = {s: {c: 0 for c in cats} for s in severities}
+    for c in clusters:
+        v = verdicts.get(c["id"])
+        if not v:
+            continue
+        sev = (c.get("consensus_severity") or "").lower()
+        if sev not in grid:
+            continue
+        grid[sev][v["verdict"]] += 1
+    out = ["| Cluster severity | → real | → smell | → nit | → wrong | Total |",
+           "|---|---:|---:|---:|---:|---:|"]
+    for s in severities:
+        row = grid[s]
+        total = sum(row.values())
+        if total == 0:
+            continue
+        out.append(f"| {s} | {row['real']} | {row['smell']} | {row['nit']} | "
+                    f"{row['wrong']} | {total} |")
+    if len(out) == 2:
+        return "_No adjudicated clusters to calibrate._"
+    return "\n".join(out)
+
+
+def _cost_value_summary(metrics: dict[str, dict],
+                          cost_data: dict[str, dict]) -> str:
+    if not metrics:
+        return "_No models to compare._"
+    by_recall = sorted(metrics.items(), key=lambda kv: -kv[1]["recall_real"])
+    by_halluc = sorted(metrics.items(), key=lambda kv: -kv[1]["hallucination_rate"])
+    by_precision = sorted(metrics.items(), key=lambda kv: -kv[1]["precision_strict"])
+
+    cost_per_real = []
+    for model, m in metrics.items():
+        if m["found_real"] <= 0:
+            continue
+        info = cost_data.get(model)
+        if not info or info.get("usd") is None:
+            continue
+        cost_per_real.append((model, info["usd"] / m["found_real"], info))
+    cost_per_real.sort(key=lambda x: x[1])
+
+    out = []
+    top_recall = by_recall[0]
+    out.append(f"- **Best recall (real):** {top_recall[0]} — "
+                f"{int(top_recall[1]['recall_real'] * 100)}% "
+                f"({top_recall[1]['found_real']}/{top_recall[1]['found_real'] + top_recall[1]['missed_real']})")
+    if cost_per_real:
+        m, cpr, info = cost_per_real[0]
+        mark = "" if info.get("kind") == "actual" else "*"
+        out.append(f"- **Best $/real:** {m} — ${cpr:.2f}{mark}")
+    top_precision = by_precision[0]
+    out.append(f"- **Best precision (real+smell):** {top_precision[0]} — "
+                f"{int(top_precision[1]['precision_strict'] * 100)}%")
+    worst_halluc = by_halluc[0]
+    if worst_halluc[1]["hallucination_rate"] > 0:
+        out.append(f"- **Highest hallucination rate:** {worst_halluc[0]} — "
+                    f"{int(worst_halluc[1]['hallucination_rate'] * 100)}% "
+                    f"of its findings labelled wrong")
+    return "\n".join(out)
+
+
+def render_findings_report(
+    template_path: Path,
+    output_path: Path,
+    run_id: str,
+    clusters: list[dict],
+    issues: list[dict],
+    verdicts: dict[int, dict],
+    metrics: dict[str, dict],
+    cost_data: dict[str, dict],
+) -> None:
+    by_cat = Counter(v["verdict"] for v in verdicts.values())
+    all_models = sorted({i["model"] for i in issues})
+    models_with_real = sum(1 for m in all_models
+                            if metrics.get(m, {}).get("found_real", 0) > 0)
+    halluc_pct = (
+        round(by_cat.get("wrong", 0) * 100 / len(clusters), 1)
+        if clusters else 0.0
+    )
+
+    template = template_path.read_text(encoding="utf-8")
+    substitutions = {
+        "{RUN_ID}": run_id,
+        "{TOTAL_FINDINGS}": str(len(issues)),
+        "{TOTAL_MODELS}": str(len(all_models)),
+        "{TOTAL_CLUSTERS}": str(len(clusters)),
+        "{REAL_COUNT}": str(by_cat.get("real", 0)),
+        "{SMELL_COUNT}": str(by_cat.get("smell", 0)),
+        "{NIT_COUNT}": str(by_cat.get("nit", 0)),
+        "{WRONG_COUNT}": str(by_cat.get("wrong", 0)),
+        "{HALLUCINATION_PCT}": f"{halluc_pct}",
+        "{MODELS_WITH_REAL}": str(models_with_real),
+        "{REAL_BUGS_TABLE}": _real_bugs_table(clusters, issues, verdicts, len(all_models)),
+        "{PER_MODEL_REAL_TABLE}": _per_model_real_table(clusters, issues, verdicts),
+        "{SINGLETON_FINDINGS_LIST}": _singleton_findings_list(clusters, issues, verdicts),
+        "{SEVERITY_CALIBRATION_TABLE}": _severity_calibration_table(clusters, verdicts),
+        "{COST_VALUE_SUMMARY}": _cost_value_summary(metrics, cost_data),
+    }
+    out = template
+    for key, value in substitutions.items():
+        out = out.replace(key, value)
+    output_path.write_text(out, encoding="utf-8")
+
+
 # ── Cost loader ────────────────────────────────────────────────────────────
 
 def load_cost_data(cost_estimates: Path, results_json: Path) -> dict[str, dict]:
@@ -263,6 +449,13 @@ def main() -> None:
     p.add_argument("--merge-into", type=Path, default=Path("worklist_judged.md"),
                    help="Where to save the worklist with merged verdicts.")
     p.add_argument("--leaderboard", type=Path, default=Path("leaderboard.md"))
+    p.add_argument("--report", type=Path, default=None,
+                   help="Optional: render findings_report.md (skeleton with auto-filled "
+                         "tables and `<!-- TODO -->` blocks for human prose).")
+    p.add_argument("--report-template", type=Path, default=DEFAULT_REPORT_TEMPLATE,
+                   help="Template for --report (default: templates/findings_report.template.md)")
+    p.add_argument("--run-id", type=str, default=None,
+                   help="Run id for the report title; defaults to verdicts.md parent dir name.")
     args = p.parse_args()
 
     if not args.verdicts.exists():
@@ -307,6 +500,23 @@ def main() -> None:
     total_smell = by_cat.get("smell", 0)
     render_leaderboard(metrics, cost_data, args.leaderboard, total_real, total_smell)
     print(f"  Leaderboard: {args.leaderboard}")
+
+    if args.report:
+        if not args.report_template.is_file():
+            print(f"  ! Report template not found: {args.report_template}")
+        else:
+            run_id = args.run_id or args.verdicts.resolve().parent.name
+            render_findings_report(
+                template_path=args.report_template,
+                output_path=args.report,
+                run_id=run_id,
+                clusters=clusters,
+                issues=issues,
+                verdicts=verdicts,
+                metrics=metrics,
+                cost_data=cost_data,
+            )
+            print(f"  Findings report (skeleton): {args.report}")
 
 
 if __name__ == "__main__":
