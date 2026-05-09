@@ -372,7 +372,7 @@ Everything below is created by the pipeline for one run.
 | File | Schema | Producer |
 |---|---|---|
 | `input.diff` | Unified diff text | user (`git diff > input.diff`) |
-| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. `cost` and `reasoning_tokens` come from OpenRouter's `usage.include` response and may be `null` for providers that don't report them. | `code_review_benchmark.py` |
+| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ..., total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, total_cost_actual_usd, total_cost_estimated_usd}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. Per-model `cost` and `reasoning_tokens` come from OpenRouter's `usage.include` response and may be `null` for providers that don't report them; `meta.total_*` aggregate across all `ok` results. | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — `Findings:` block of numbered items: `N) [severity: blocker\|major\|minor\|nit] summary` followed by `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx into issues[]>]}] }` | Claude in chat — or `llm_judge.py cluster` |

@@ -370,7 +370,7 @@ ai-code-review-benchmark/
 | Файл | Схема | Кто создаёт |
 |---|---|---|
 | `input.diff` | Unified diff (текст) | пользователь (`git diff > input.diff`) |
-| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. `cost` и `reasoning_tokens` приходят из ответа OpenRouter (включены через `usage.include`); могут быть `null` для провайдеров, которые их не отдают. | `code_review_benchmark.py` |
+| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ..., total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, total_cost_actual_usd, total_cost_estimated_usd}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. Per-model `cost` и `reasoning_tokens` приходят из ответа OpenRouter (включены через `usage.include`); могут быть `null` для провайдеров, которые их не отдают. `meta.total_*` — агрегаты по всем `ok` результатам. | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — блок `Findings:` с пронумерованными пунктами: `N) [severity: blocker\|major\|minor\|nit] summary` и подпунктами `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx в issues[]>]}] }` | Claude в чате — или `llm_judge.py cluster` |

@@ -265,23 +265,23 @@ def _extract_field(body: str, name: str) -> str | None:
 # ── Summary table ───────────────────────────────────────────────────────────
 
 def print_summary(results: dict):
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 105)
     print("SUMMARY")
-    print("=" * 90)
+    print("=" * 105)
     header = (
         f"{'Model':<22} {'Status':<8} {'Issues':<7} "
         f"{'B':<3} {'M':<3} {'m':<3} {'n':<3} "
-        f"{'Time':<8} {'Tokens':<10}"
+        f"{'Time':<8} {'Tokens':<10} {'Reason.':<8} {'Cost':<8}"
     )
     print(header)
-    print("-" * 90)
+    print("-" * 105)
 
     for name, res in results.items():
         if res["status"] != "ok":
             print(
                 f"{name:<22} {'FAIL':<8} {'-':<7} "
                 f"{'-':<3} {'-':<3} {'-':<3} {'-':<3} "
-                f"{str(res.get('elapsed_sec','?')):<8} {'-':<10}"
+                f"{str(res.get('elapsed_sec','?')):<8} {'-':<10} {'-':<8} {'-':<8}"
             )
             continue
 
@@ -294,15 +294,20 @@ def print_summary(results: dict):
                     sev[key] += 1
                     break
 
-        tokens = res.get("usage", {}).get("total_tokens") or "-"
+        usage = res.get("usage") or {}
+        tokens = usage.get("total_tokens") or "-"
+        reasoning = usage.get("reasoning_tokens")
+        reasoning_str = str(reasoning) if reasoning else "-"
+        cost = usage.get("cost")
+        cost_str = f"${cost:.4f}" if cost is not None else "-"
         print(
             f"{name:<22} {'OK':<8} {len(issues):<7} "
             f"{sev['blocker']:<3} {sev['major']:<3} {sev['minor']:<3} {sev['nit']:<3} "
-            f"{str(res['elapsed_sec']):<8} {str(tokens):<10}"
+            f"{str(res['elapsed_sec']):<8} {str(tokens):<10} {reasoning_str:<8} {cost_str:<8}"
         )
 
-    print("=" * 90)
-    print("B=blocker, M=major, m=minor, n=nit")
+    print("=" * 105)
+    print("B=blocker, M=major, m=minor, n=nit. Reason.=reasoning tokens, Cost=$ from OpenRouter usage.")
 
 
 # ── Per-model markdown output ──────────────────────────────────────────────
@@ -323,16 +328,61 @@ def save_per_model_markdown(out_dir: Path, results: dict):
             continue
 
         usage = res.get("usage") or {}
+        token_parts = [
+            f"prompt={usage.get('prompt_tokens')}",
+            f"completion={usage.get('completion_tokens')}",
+            f"total={usage.get('total_tokens')}",
+        ]
+        reasoning = usage.get("reasoning_tokens")
+        if reasoning is not None:
+            token_parts.append(f"reasoning={reasoning}")
+        tokens_line = "**Tokens:** " + " ".join(token_parts) + "  \n"
+
+        cost = usage.get("cost")
+        cost_line = f"**Cost:** ${cost:.4f}  \n" if cost is not None else ""
+
         header = (
             f"# {name}\n\n"
             f"**Status:** OK  \n"
             f"**Time:** {res.get('elapsed_sec')} s  \n"
-            f"**Tokens:** prompt={usage.get('prompt_tokens')} "
-            f"completion={usage.get('completion_tokens')} total={usage.get('total_tokens')}  \n"
-            f"**Findings parsed:** {res.get('issues_count')}\n\n"
+            + tokens_line
+            + cost_line
+            + f"**Findings parsed:** {res.get('issues_count')}\n\n"
             f"---\n\n"
         )
         path.write_text(header + (res.get("content") or ""), encoding="utf-8")
+
+
+def _compute_meta_totals(results: dict) -> dict:
+    """Aggregate per-model usage into run-level totals for results.json meta.
+
+    Only `status == "ok"` results contribute. Fields that the API didn't
+    return are skipped (so a single provider not reporting `cost` doesn't
+    poison the run total).
+    """
+    total_prompt = 0
+    total_completion = 0
+    total_reasoning = 0
+    total_cost_actual = 0.0
+    for res in results.values():
+        if res.get("status") != "ok":
+            continue
+        usage = res.get("usage") or {}
+        if usage.get("prompt_tokens") is not None:
+            total_prompt += usage["prompt_tokens"]
+        if usage.get("completion_tokens") is not None:
+            total_completion += usage["completion_tokens"]
+        if usage.get("reasoning_tokens") is not None:
+            total_reasoning += usage["reasoning_tokens"]
+        if usage.get("cost") is not None:
+            total_cost_actual += usage["cost"]
+    return {
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "total_reasoning_tokens": total_reasoning,
+        "total_cost_actual_usd": round(total_cost_actual, 6),
+        "total_cost_estimated_usd": 0.0,
+    }
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -463,6 +513,7 @@ def main():
             "models_file": str(models_file),
             "timestamp": timestamp,
             "models_count": len(selected),
+            **_compute_meta_totals(results),
         },
         "results": results,
     }

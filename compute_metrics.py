@@ -172,6 +172,9 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     rows = sorted(metrics.items(),
                   key=lambda kv: (-kv[1]["recall_real"],
                                    kv[1]["hallucination_rate"]))
+    has_reasoning = any(
+        info.get("reasoning_tokens") for info in cost_data.values()
+    )
     out = []
     out.append("# Code Review Benchmark — Leaderboard\n")
     out.append(f"**Real**: {total_real} · **Smell**: {total_smell} · "
@@ -180,15 +183,26 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     out.append("- **Recall (real)** — % of real bugs found by the model")
     out.append("- **Precision** — % of its findings that were real/smell (excluding nit and wrong)")
     out.append("- **Halluc.** — % of its findings labelled wrong")
-    out.append("- **$/real** — cost per real bug found (`*` — estimate)\n")
+    out.append("- **$/real** — cost per real bug found (`*` — estimate)")
+    if has_reasoning:
+        out.append("- **Reason.** — reasoning tokens (OpenRouter `usage.completion_tokens_details.reasoning_tokens`)")
+    out.append("")
 
-    out.append("| Model | Real | Smell | Nit | Wrong | Recall | Precision | Halluc. | $ | $/real |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    header_cols = ["Model", "Real", "Smell", "Nit", "Wrong",
+                    "Recall", "Precision", "Halluc.", "$", "$/real"]
+    align_cols = ["---", "---:", "---:", "---:", "---:",
+                   "---:", "---:", "---:", "---:", "---:"]
+    if has_reasoning:
+        header_cols.append("Reason.")
+        align_cols.append("---:")
+    out.append("| " + " | ".join(header_cols) + " |")
+    out.append("|" + "|".join(align_cols) + "|")
+
     for model, m in rows:
         cost_info = cost_data.get(model)
-        if cost_info:
+        if cost_info and cost_info.get("usd") is not None:
             cost = cost_info["usd"]
-            mark = "" if cost_info["kind"] == "actual" else "*"
+            mark = "" if cost_info.get("kind") == "actual" else "*"
             cost_str = f"${cost:.2f}{mark}"
             cost_per_real = (
                 f"${cost / m['found_real']:.2f}{mark}"
@@ -197,12 +211,19 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
         else:
             cost_str = "-"
             cost_per_real = "-"
-        out.append(
-            f"| {model} | {m['found_real']} | {m['found_smell']} | "
-            f"{m['found_nit']} | {m['found_wrong']} | "
-            f"{m['recall_real']*100:.0f}% | {m['precision_strict']*100:.0f}% | "
-            f"{m['hallucination_rate']*100:.0f}% | {cost_str} | {cost_per_real} |"
-        )
+        row_cells = [
+            model,
+            str(m['found_real']), str(m['found_smell']),
+            str(m['found_nit']), str(m['found_wrong']),
+            f"{m['recall_real']*100:.0f}%",
+            f"{m['precision_strict']*100:.0f}%",
+            f"{m['hallucination_rate']*100:.0f}%",
+            cost_str, cost_per_real,
+        ]
+        if has_reasoning:
+            reasoning = (cost_info or {}).get("reasoning_tokens")
+            row_cells.append(f"{reasoning:,}" if reasoning else "-")
+        out.append("| " + " | ".join(row_cells) + " |")
 
     out.append("")
     out.append(
@@ -403,10 +424,15 @@ def render_findings_report(
 # ── Cost loader ────────────────────────────────────────────────────────────
 
 def load_cost_data(cost_estimates: Path, results_json: Path) -> dict[str, dict]:
-    """Return {model_name: {'usd': float, 'kind': str, 'source': str}}.
+    """Return {model_name: {'usd': float, 'kind': str, 'source': str,
+                              'reasoning_tokens': int | None}}.
 
-    Priority: cost_estimates.json (explicit annotation) → results.json
+    Cost priority: cost_estimates.json (explicit annotation) → results.json
     (if cost is present in the API response).
+
+    `reasoning_tokens` is always read from results.json (regardless of where
+    cost came from) so it appears in the leaderboard for any model that
+    reported reasoning usage.
     """
     out: dict[str, dict] = {}
     if cost_estimates and cost_estimates.exists():
@@ -414,17 +440,22 @@ def load_cost_data(cost_estimates: Path, results_json: Path) -> dict[str, dict]:
         for k, v in data.items():
             if k.startswith("_"):
                 continue
-            out[k] = v
+            out[k] = dict(v)
     if results_json and results_json.exists():
         data = json.loads(results_json.read_text(encoding='utf-8'))
         for name, res in data.get("results", {}).items():
             key = name.replace(" ", "_").replace(".", "_")
-            if key in out:
-                continue
-            cost = res.get("cost") or (res.get("usage", {}) or {}).get("cost")
-            if cost is not None:
-                out[key] = {"usd": float(cost), "kind": "actual",
-                            "source": "results.json/api"}
+            usage = res.get("usage", {}) or {}
+            reasoning = usage.get("reasoning_tokens")
+            entry = out.get(key)
+            if entry is None:
+                cost = res.get("cost") or usage.get("cost")
+                if cost is not None:
+                    entry = {"usd": float(cost), "kind": "actual",
+                             "source": "results.json/api"}
+                    out[key] = entry
+            if entry is not None and reasoning is not None:
+                entry["reasoning_tokens"] = reasoning
     return out
 
 
