@@ -350,6 +350,7 @@ async def run_agent_loop(
     final_content = ""
     t0 = time.time()
     file_read_counter: Counter = Counter()  # relative_path → read count
+    step = 0
 
     for step in range(1, max_steps + 1):
         t_step = time.time()
@@ -570,8 +571,9 @@ async def _run_pipeline(
 ) -> tuple[list[dict], dict, dict]:
     """Open Serena, optionally run all models, return (tools, results, meta_extra)."""
     serena_cmd = shlex.split(args.serena_cmd)
-    wt_dir = _make_worktree(repo_path, source_commit)
+    wt_dir: Path | None = None
     try:
+        wt_dir = _make_worktree(repo_path, source_commit)
         async with open_mcp_session(serena_cmd, wt_dir) as (session, tools):
             if args.list_tools_only:
                 return tools, {}, {}
@@ -628,7 +630,7 @@ async def _run_pipeline(
                     f"{res['elapsed_sec']}s"
                 )
                 if i < len(selected):
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(args.inter_model_sleep)
             return tools, results, {
                 "tools_curated": [t["name"] for t in tools],
                 "max_steps": args.max_steps,
@@ -636,7 +638,8 @@ async def _run_pipeline(
                 "cost_cap_overrides": args.cost_cap_overrides,
             }
     finally:
-        _cleanup_worktree(repo_path, wt_dir)
+        if wt_dir is not None:
+            _cleanup_worktree(repo_path, wt_dir)
 
 
 def _build_run_log_path(output_path: Path | None, diff_path: Path) -> Path:
@@ -684,6 +687,8 @@ def main() -> int:
     parser.add_argument("--cost-cap-overrides", type=_parse_cost_overrides,
                         default={},
                         help='Per-model cost cap overrides: "anthropic/claude-opus-4-7=3.0,..."')
+    parser.add_argument("--inter-model-sleep", type=float, default=2.0,
+                        help="Seconds to wait between models to respect rate limits (default: 2)")
     parser.add_argument("--list-tools-only", action="store_true",
                         help="Connect to Serena, print the curated tool list, then exit (A1.1 DoD).")
     args = parser.parse_args()
