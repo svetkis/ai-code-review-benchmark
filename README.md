@@ -25,6 +25,35 @@ findings and ruling on each cluster. The parsing and the summing-up are
 done by code. The judgement calls are made by a human (with Claude in chat
 helping).
 
+## Scope: what this measures (and what it doesn't)
+
+This bench measures a model in **bounded-context single-shot review** mode:
+a diff plus N context files in a single call through the OpenRouter API —
+no tool use, no follow-up questions, no access to the rest of the codebase.
+That's deliberate: every model gets the same input, results are comparable,
+runs are reproducible.
+
+**What this bench does NOT measure:**
+
+- **agentic review** — the model navigates the repo, reads callsites,
+  verifies hypotheses by running code. That's no longer a model, it's a
+  `model + tools` pipeline, and the leaderboard there may look different;
+- **harness effect** — Copilot+Opus, Claude Code+Opus and a bare API+Opus
+  call give different results on the same prompt;
+- **reasoning outside the context block** — if a bug is only provable
+  via a file you didn't pass in, nobody will catch it.
+
+**When this bench applies:** picking a model for CI review, a PR-commenting
+bot, or an IDE plugin with bounded context. For picking a model for
+interactive review with tool use, you need a different harness — the
+same diff, but run through Serena / an MCP wrapper.
+
+**Sensitivity.** Results depend on the quality of the code in the diff
+(the gap between models on messy code is not the same as on clean code)
+and on the prompt ("prove each finding" measurably cuts the hallucination
+rate). Run on several diffs of varying difficulty, and keep the prompt
+fixed when comparing models.
+
 ## Pipeline
 
 ```mermaid
