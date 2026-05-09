@@ -2,10 +2,17 @@
 
 [English](README.md) · [Русский](README.ru.md)
 
-Scripts + methodology to compare how different LLMs do code review.
-Take your diff, run it through N models, pile up the findings, dedupe them,
-label each one with a verdict — and get precision, recall and hallucination
-rate for every model.
+> **One diff. N models. A leaderboard that actually matters for your codebase.**
+
+Compare how different LLMs review *your* code. Take a real diff, run it
+through multiple models, adjudicate the findings, and get per-model
+**precision, recall, and hallucination rate** — on your code, not somebody
+else's toy problems.
+
+- **Use this if** you're choosing an LLM for CI review, a PR-commenting bot,
+  or an IDE plugin with bounded context.
+- **Don't use this if** you need agentic review with full repo navigation
+  and tool use — that's a different benchmark (see [Scope](#scope-what-this-measures-and-what-it-doesnt) below).
 
 Author: Svetlana Meleshkina. Licensed under [MIT](LICENSE).
 
@@ -124,6 +131,29 @@ $env:OPENROUTER_API_KEY = "..."   # PowerShell
 ```bash
 export OPENROUTER_API_KEY=...     # bash
 ```
+
+## Quick start
+
+```bash
+# 1. Run models on your diff
+python code_review_benchmark.py my.diff -c file.cs -o runs/demo/results.json
+
+# 2. Parse findings
+python aggregate_findings.py parse --results-dir runs/demo/results -o runs/demo/findings.json
+
+# 3. Cluster (Claude in chat, or use llm_judge.py cluster)
+# 4. Render worklist
+python aggregate_findings.py render --findings runs/demo/findings.json \
+  --clusters runs/demo/clusters.json -o runs/demo/worklist.md
+
+# 5. Adjudicate (Claude in chat, or use llm_judge.py adjudicate)
+# 6. Compute metrics
+python compute_metrics.py --verdicts runs/demo/verdicts.md \
+  --findings runs/demo/findings.json --clusters runs/demo/clusters.json \
+  --results runs/demo/results.json --leaderboard runs/demo/leaderboard.md
+```
+
+Steps 3 and 5 require human judgement — see the detailed guide below.
 
 ## How to use
 

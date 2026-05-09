@@ -2,10 +2,18 @@
 
 [English](README.md) · [Русский](README.ru.md)
 
-Скрипты + методика, чтобы сравнить, как разные LLM делают code review.
-Берёшь свой diff, прогоняешь через N моделей, собираешь находки в кучу,
-дедуплицируешь, размечаешь вердиктами — получаешь precision, recall и
-hallucination rate по каждой модели.
+> **Один diff. N моделей. Лидерборд, который имеет значение именно для твоей кодовой базы.**
+
+Сравни, как разные LLM ревьюят *твой* код. Возьми реальный diff, прогони
+через несколько моделей, разметь находки человеком и получь по каждой модели
+**precision, recall и hallucination rate** — на твоём коде, а не на чужих
+игрушечных задачах.
+
+- **Используй**, если выбираешь модель для CI-ревью, PR-бота или IDE-плагина
+  с ограниченным контекстом.
+- **Не используй**, если нужно агентское ревью с навигацией по всему репо
+  и вызовом инструментов — для этого нужен другой стенд (см. раздел
+  [Что меряется](#что-именно-меряется-и-что-нет)).
 
 Автор: Светлана Мелешкина. Лицензия — [MIT](LICENSE).
 
@@ -120,6 +128,29 @@ $env:OPENROUTER_API_KEY = "..."   # PowerShell
 ```bash
 export OPENROUTER_API_KEY=...     # bash
 ```
+
+## Быстрый старт
+
+```bash
+# 1. Прогон моделей на твоём diff
+python code_review_benchmark.py my.diff -c file.cs -o runs/demo/results.json
+
+# 2. Парсинг находок
+python aggregate_findings.py parse --results-dir runs/demo/results -o runs/demo/findings.json
+
+# 3. Кластеризация (Claude в чате или llm_judge.py cluster)
+# 4. Сборка worklist
+python aggregate_findings.py render --findings runs/demo/findings.json \
+  --clusters runs/demo/clusters.json -o runs/demo/worklist.md
+
+# 5. Судейство (Claude в чате или llm_judge.py adjudicate)
+# 6. Подсчёт метрик
+python compute_metrics.py --verdicts runs/demo/verdicts.md \
+  --findings runs/demo/findings.json --clusters runs/demo/clusters.json \
+  --results runs/demo/results.json --leaderboard runs/demo/leaderboard.md
+```
+
+Шаги 3 и 5 требуют человеческого суждения — подробности ниже.
 
 ## Как пользоваться
 
