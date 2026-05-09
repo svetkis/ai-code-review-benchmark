@@ -143,6 +143,8 @@ def main() -> int:
                    help="Where to write the full probe_<timestamp>.json report")
     p.add_argument("--timeout", type=int, default=60,
                    help="Per-model HTTP timeout in seconds")
+    p.add_argument("--sleep", type=float, default=0.5,
+                   help="Seconds between probe requests (default: 0.5)")
     p.add_argument("--models", "-m", nargs="*", default=None,
                    help="Subset of model display names to probe. Default: all.")
     args = p.parse_args()
@@ -179,7 +181,7 @@ def main() -> int:
             reason = result.get("reason", "unknown")
             print(f"FAIL — {reason}")
         if i < len(selected):
-            time.sleep(0.5)
+            time.sleep(args.sleep)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     args.report_dir.mkdir(parents=True, exist_ok=True)
