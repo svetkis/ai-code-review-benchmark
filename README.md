@@ -23,36 +23,49 @@ work; a person (helped by Claude in chat) makes the calls that matter.
 
 ## Pipeline
 
+```mermaid
+flowchart TD
+    Input([diff + context files])
+
+    Input --> S1[1. code_review_benchmark.py<br/>OpenRouter, N models]
+    S1 --> A1[results.json<br/>+ results/&lt;model&gt;.md]
+
+    A1 --> S2[2. aggregate_findings.py parse]
+    S2 --> A2[findings.json]
+
+    A2 --> S3[3. Claude in chat — clustering]
+    A2 -. alt .-> S3alt[llm_judge.py cluster]
+    S3 --> A3[clusters.json]
+    S3alt -.-> A3
+
+    A3 --> S4[4. aggregate_findings.py render]
+    S4 --> A4[worklist.md]
+
+    A4 --> S5[5. Claude in chat — adjudication]
+    A4 -. alt .-> S5alt[llm_judge.py adjudicate]
+    S5alt -.-> Draft[verdicts.draft.md]
+    Draft -. human review .-> Human
+    S5 --> Human{{verdicts.md<br/>human-approved}}
+
+    Human --> S6[6. compute_metrics.py]
+    S6 --> Out1[worklist_judged.md]
+    S6 --> Out2[leaderboard.md]
+    S6 -. --report .-> Out3[findings_report.md]
+
+    classDef llm fill:#fef3c7,stroke:#d97706,color:#000
+    classDef py fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef human fill:#fce7f3,stroke:#be185d,color:#000,font-weight:bold
+    classDef artifact fill:#f3f4f6,stroke:#6b7280,color:#000
+
+    class S1,S3,S3alt,S5,S5alt llm
+    class S2,S4,S6 py
+    class Human human
+    class Input,A1,A2,A3,A4,Draft,Out1,Out2,Out3 artifact
 ```
-[diff + context files]
-        ↓
-1. code_review_benchmark.py     ← OpenRouter, N models sequentially
-        ↓
-   results.json + results/<model>.md
-        ↓
-2. aggregate_findings.py parse  ← parses .md → findings.json (no LLM)
-        ↓
-   findings.json
-        ↓
-3. Claude in chat (default)     ← clusters findings → clusters.json
-   or llm_judge.py cluster      ← (alt: OpenRouter judge)
-        ↓
-   clusters.json
-        ↓
-4. aggregate_findings.py render ← findings + clusters → worklist.md (no LLM)
-        ↓
-   worklist.md
-        ↓
-5. Claude in chat (default)     ← per-cluster verdict drafts
-   or llm_judge.py adjudicate   ← (alt: OpenRouter judge → verdicts.draft.md)
-        ↓
-   verdicts.md  (human-approved)
-        ↓
-6. compute_metrics.py           ← metrics + leaderboard (+ optional report)
-        ↓
-   worklist_judged.md + leaderboard.md
-   (+ findings_report.md if --report)
-```
+
+Legend: yellow — LLM calls (OpenRouter or Claude in chat), blue —
+pure-Python (no LLM), pink — human checkpoint. Dashed branches show the
+optional `llm_judge.py` path for users without Claude Code.
 
 **Design principle:** the bulk Python scripts (parsing, rendering, metrics)
 make zero LLM calls. Anything that needs reasoning (clustering, adjudication)

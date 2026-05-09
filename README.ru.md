@@ -24,36 +24,50 @@ precision / recall / hallucination rate.
 
 ## Pipeline
 
+```mermaid
+flowchart TD
+    Input([diff + контекстные файлы])
+
+    Input --> S1[1. code_review_benchmark.py<br/>OpenRouter, N моделей]
+    S1 --> A1[results.json<br/>+ results/&lt;model&gt;.md]
+
+    A1 --> S2[2. aggregate_findings.py parse]
+    S2 --> A2[findings.json]
+
+    A2 --> S3[3. Claude в чате — кластеризация]
+    A2 -. alt .-> S3alt[llm_judge.py cluster]
+    S3 --> A3[clusters.json]
+    S3alt -.-> A3
+
+    A3 --> S4[4. aggregate_findings.py render]
+    S4 --> A4[worklist.md]
+
+    A4 --> S5[5. Claude в чате — судейство]
+    A4 -. alt .-> S5alt[llm_judge.py adjudicate]
+    S5alt -.-> Draft[verdicts.draft.md]
+    Draft -. вычитка .-> Human
+    S5 --> Human{{verdicts.md<br/>утверждено человеком}}
+
+    Human --> S6[6. compute_metrics.py]
+    S6 --> Out1[worklist_judged.md]
+    S6 --> Out2[leaderboard.md]
+    S6 -. --report .-> Out3[findings_report.md]
+
+    classDef llm fill:#fef3c7,stroke:#d97706,color:#000
+    classDef py fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef human fill:#fce7f3,stroke:#be185d,color:#000,font-weight:bold
+    classDef artifact fill:#f3f4f6,stroke:#6b7280,color:#000
+
+    class S1,S3,S3alt,S5,S5alt llm
+    class S2,S4,S6 py
+    class Human human
+    class Input,A1,A2,A3,A4,Draft,Out1,Out2,Out3 artifact
 ```
-[diff + контекстные файлы]
-        ↓
-1. code_review_benchmark.py     ← OpenRouter, N моделей последовательно
-        ↓
-   results.json + results/<model>.md
-        ↓
-2. aggregate_findings.py parse  ← парсит .md → findings.json (без LLM)
-        ↓
-   findings.json
-        ↓
-3. Claude в чате (по умолчанию) ← кластеризация → clusters.json
-   или llm_judge.py cluster     ← (alt: судья через OpenRouter)
-        ↓
-   clusters.json
-        ↓
-4. aggregate_findings.py render ← findings + clusters → worklist.md (без LLM)
-        ↓
-   worklist.md
-        ↓
-5. Claude в чате (по умолчанию) ← черновики вердиктов
-   или llm_judge.py adjudicate  ← (alt: судья через OpenRouter → verdicts.draft.md)
-        ↓
-   verdicts.md  (после человеческого ревью)
-        ↓
-6. compute_metrics.py           ← метрики + лидерборд (+ опц. отчёт)
-        ↓
-   worklist_judged.md + leaderboard.md
-   (+ findings_report.md если --report)
-```
+
+Легенда: жёлтый — LLM-вызовы (OpenRouter или Claude в чате), синий —
+чисто-Python без LLM, розовый — человеческий чекпоинт. Пунктирные ветки
+— опциональный путь через `llm_judge.py` для пользователей без Claude
+Code.
 
 **Принцип:** основные Python-скрипты (парсинг, рендеринг, метрики) LLM не
 зовут. Всё, что требует рассуждения (кластеризация, суждение), делает Claude
