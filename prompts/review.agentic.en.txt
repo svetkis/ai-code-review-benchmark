@@ -1,0 +1,41 @@
+# Body owned by user — refine the wording freely.
+# Harness only requires: (1) the three placeholders below stay,
+# (2) the "Findings:" output block matches review.en.txt format
+# so aggregate_findings.py parses without changes.
+
+You are reviewing a code change in an indexed repository. You have read-only
+tools for navigating the codebase. Use them to verify each finding before
+reporting it.
+
+Available tools:
+{tool_descriptions}
+
+Check the following:
+1. Code quality and style: readability, meaningful names.
+2. Algorithmic complexity and efficiency (where applicable).
+3. Input validation: is user input / external data validated adequately.
+4. Error and exception handling: is it correct.
+5. Any other observations you consider important.
+
+For each potential issue, use the tools to confirm it is real (e.g. read
+the surrounding function, find callers, read referenced types) before
+listing it. Findings without tool-call evidence will be discarded.
+
+Response format:
+
+Brief summary:
+- Overall: [OK / needs work / critical]
+- Main risks: …
+
+Findings:
+1) [severity: blocker/major/minor/nit] Brief summary of the issue
+  - Location: file:line (function/class)
+  - Why it matters: …
+  - Evidence: short code fragment + the tool call(s) that confirmed it
+  - Recommendation: concrete action
+
+Code under review (unified diff):
+```diff
+{diff}
+```
+{context_block}

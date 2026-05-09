@@ -1,0 +1,771 @@
+#!/usr/bin/env python3
+"""Agentic-track harness for the code review benchmark.
+
+Runs a read-only MCP-tool agent loop where the harness is constant
+(curated 5-tool set, step budget, cost guardrail) and only the model
+varies. Output format is compatible with aggregate_findings.py /
+compute_metrics.py — see docs/plans/2026-05-09-agentic-track.md.
+
+Stop-condition contract (per A1.3):
+    - finish_reason == "tool_calls"   -> dispatch tools, continue
+    - finish_reason == "stop"         -> halt_reason="completed"
+    - finish_reason == "length"       -> halt_reason="content_truncated"
+    - finish_reason == "content_filter" -> halt_reason="completed"
+    - max_steps exceeded              -> halt_reason="step_budget"
+    - cost cap exceeded               -> halt_reason="cost_budget"   (A1.4)
+    - tool args invalid JSON          -> halt_reason="tool_call_parse_error"
+    - tool_calls=0 across whole run + findings>0 -> "single_shot_with_findings"
+    - tool_calls=0 across whole run + findings=0 -> "silent_refusal"
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from code_review_benchmark import (  # noqa: E402  reuse cross-track contract
+    OPENROUTER_URL,
+    parse_issues,
+    save_per_model_markdown,
+    _compute_meta_totals,
+)
+
+CURATED_TOOLS: tuple[str, ...] = (
+    "get_symbols_overview",
+    "find_symbol",
+    "find_referencing_symbols",
+    "read_file",
+    "list_dir",
+)
+# Nudge the model after this many reads of the same file (loop guard).
+_MAX_FILE_READS = 4
+
+DEFAULT_SERENA_CMD = (
+    "uvx --from git+https://github.com/oraios/serena "
+    "serena start-mcp-server --transport stdio"
+)
+DEFAULT_MAX_STEPS = 20
+DEFAULT_MAX_COST_PER_MODEL = 1.0
+DEFAULT_PROMPT_PATH = Path("prompts/review.agentic.en.txt")
+DEFAULT_MODELS_FILE = Path("models.agentic.json")
+
+# How much of a tool result we keep in messages. Long responses (e.g.
+# `read_file` on a 5000-line file) blow the context. Truncate at the
+# tool-message layer; keep the full text in trace (A1.5).
+TOOL_RESULT_MAX_CHARS = 12_000
+
+
+# ---------- schema conversion (A1.2) ----------
+
+def mcp_to_openai_tool(mcp_tool: dict) -> dict:
+    """Convert an MCP tool spec to the OpenAI function-calling format.
+
+    Input:  {"name": str, "description": str|None, "inputSchema": dict}
+    Output: {"type": "function", "function": {"name", "description", "parameters"}}
+
+    Both formats use JSON Schema for parameters, so the schema body passes
+    through unchanged. We only normalize: (1) wrap in the function envelope,
+    (2) coerce None/missing description to "" (some providers reject null),
+    (3) ensure `parameters` is always an object schema.
+    """
+    name = mcp_tool["name"]
+    description = mcp_tool.get("description") or ""
+    schema = mcp_tool.get("inputSchema") or {"type": "object", "properties": {}}
+    if "type" not in schema:
+        schema = {"type": "object", **schema}
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": schema,
+        },
+    }
+
+
+def render_tool_descriptions(mcp_tools: list[dict]) -> str:
+    """Render the {tool_descriptions} block injected into the agentic prompt."""
+    lines = []
+    for t in mcp_tools:
+        first_line = (t.get("description") or "").strip().splitlines()
+        summary = first_line[0] if first_line else ""
+        lines.append(f"- {t['name']}: {summary}")
+    return "\n".join(lines)
+
+
+# ---------- CLI / setup ----------
+
+def _parse_cost_overrides(spec: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise argparse.ArgumentTypeError(
+                f"--cost-cap-overrides: expected 'model=cost', got {pair!r}"
+            )
+        k, v = pair.split("=", 1)
+        out[k.strip()] = float(v.strip())
+    return out
+
+
+def _detect_source_commit(diff_path: Path, repo_path: Path) -> str:
+    text = diff_path.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        if line.startswith("source-commit:"):
+            return line.split(":", 1)[1].strip()
+    head = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    )
+    return head.stdout.strip()
+
+
+def _make_worktree(repo_path: Path, source_commit: str) -> Path:
+    wt_dir = Path(tempfile.mkdtemp(prefix=f"agentic-{source_commit[:8]}-"))
+    wt_dir.rmdir()  # git worktree add wants the path not to exist
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "add", "--detach",
+         str(wt_dir), source_commit],
+        check=True, capture_output=True, text=True,
+    )
+    # Serena's `.serena/project.yml` is typically gitignored, so the
+    # worktree won't contain it. Copy it from the source repo so Serena
+    # can activate the project.
+    src_serena = repo_path / ".serena" / "project.yml"
+    if src_serena.is_file():
+        dst = wt_dir / ".serena"
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_serena, dst / "project.yml")
+    return wt_dir
+
+
+def _cleanup_worktree(repo_path: Path, wt_dir: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo_path), "worktree", "remove", "--force",
+         str(wt_dir)],
+        check=False, capture_output=True, text=True,
+    )
+    if wt_dir.exists():
+        shutil.rmtree(wt_dir, ignore_errors=True)
+
+
+def _resolve_serena_version(serena_cmd: list[str]) -> str:
+    """Best-effort: ask the resolver for a version string."""
+    head = serena_cmd[0]
+    candidates = [[head, "--version"]]
+    for cmd in candidates:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return "unknown"
+
+
+def _load_models(path: Path) -> dict[str, str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+# ---------- MCP session lifecycle ----------
+
+@asynccontextmanager
+async def open_mcp_session(serena_cmd: list[str], project_path: Path):
+    """Open a Serena MCP session, yield (session, curated_tool_specs).
+
+    Curated tool specs are the dict form expected by mcp_to_openai_tool.
+    """
+    try:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+    except ImportError as e:
+        raise SystemExit(
+            "Error: the 'mcp' Python package is required. Install via "
+            "`pip install mcp` (already in requirements.txt)."
+        ) from e
+
+    params = StdioServerParameters(
+        command=serena_cmd[0],
+        args=[*serena_cmd[1:], "--project", str(project_path)],
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools_result = await session.list_tools()
+            curated = [
+                {
+                    "name": t.name,
+                    "description": (t.description or "").strip(),
+                    "inputSchema": t.inputSchema,
+                }
+                for t in tools_result.tools
+                if t.name in CURATED_TOOLS
+            ]
+            yield session, curated
+
+
+# ---------- agent loop (A1.3) ----------
+
+def _build_user_prompt(
+    template_path: Path, diff_text: str, tool_descriptions: str,
+    context_block: str = "",
+) -> str:
+    tpl = template_path.read_text(encoding="utf-8")
+    return tpl.format(
+        diff=diff_text,
+        context_block=context_block,
+        tool_descriptions=tool_descriptions,
+    )
+
+
+def _serialize_mcp_result(call_result: Any) -> str:
+    """Flatten an MCP CallToolResult into a string for the `tool` message."""
+    parts: list[str] = []
+    for item in getattr(call_result, "content", []) or []:
+        text = getattr(item, "text", None)
+        if text is not None:
+            parts.append(text)
+            continue
+        # Non-text content (image, resource link) — represent compactly.
+        parts.append(json.dumps({"non_text_content": str(type(item).__name__)}))
+    text = "\n".join(parts) if parts else ""
+    if getattr(call_result, "isError", False):
+        text = f"[tool error]\n{text}"
+    if len(text) > TOOL_RESULT_MAX_CHARS:
+        text = (text[:TOOL_RESULT_MAX_CHARS]
+                + f"\n[... truncated {len(text) - TOOL_RESULT_MAX_CHARS} chars]")
+    return text
+
+
+def _post_openrouter(
+    model_id: str, messages: list[dict], openai_tools: list[dict],
+    api_key: str, timeout: int,
+) -> tuple[int, dict | str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.environ.get(
+            "OPENROUTER_REFERER",
+            "https://github.com/svetkis/ai-code-review-benchmark",
+        ),
+        "X-Title": "Code Review Benchmark (agentic)",
+    }
+    payload = {
+        "model": model_id,
+        "messages": messages,
+        "tools": openai_tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+        "max_tokens": 16000,
+        "temperature": 0.0,
+        "usage": {"include": True},
+    }
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload,
+                         timeout=timeout)
+    if resp.status_code != 200:
+        return resp.status_code, resp.text[:2000]
+    return 200, resp.json()
+
+
+def _open_trace(trace_dir: Path | None, model_name: str):
+    """Open a per-model JSONL trace writer; returns (writer_fn, close_fn)."""
+    if trace_dir is None:
+        return (lambda _row: None), (lambda: None)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in model_name)
+    f = (trace_dir / f"{safe}.trace.jsonl").open("w", encoding="utf-8")
+    def write(row: dict) -> None:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+    return write, f.close
+
+
+def _summarize_args(args: dict, max_chars: int = 200) -> str:
+    s = json.dumps(args, ensure_ascii=False)
+    return s if len(s) <= max_chars else s[:max_chars] + "…"
+
+
+async def run_agent_loop(
+    session: Any,
+    model_id: str,
+    model_name: str,
+    user_prompt: str,
+    openai_tools: list[dict],
+    api_key: str,
+    max_steps: int,
+    max_cost: float,
+    timeout_per_step: int = 600,
+    trace_dir: Path | None = None,
+) -> dict:
+    """Run the OpenRouter <-> MCP loop for one model.
+
+    Returns a result dict in the same shape as code_review_benchmark.call_model
+    plus agentic-specific fields: tool_calls, steps_taken, halt_reason,
+    cost_running.
+    """
+    write_trace, close_trace = _open_trace(trace_dir, model_name)
+    messages: list[dict] = [{"role": "user", "content": user_prompt}]
+    total_usage = {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "reasoning_tokens": 0, "cost": 0.0,
+    }
+    tool_call_count = 0
+    halt_reason: str | None = None
+    final_content = ""
+    t0 = time.time()
+    file_read_counter: Counter = Counter()  # relative_path → read count
+
+    for step in range(1, max_steps + 1):
+        t_step = time.time()
+        status, body = _post_openrouter(
+            model_id, messages, openai_tools, api_key, timeout_per_step,
+        )
+        latency_ms = int((time.time() - t_step) * 1000)
+        if status != 200:
+            write_trace({
+                "step": step, "phase": "model_call",
+                "finish_reason": None, "tool": None,
+                "args_summary": None, "result_size_chars": 0,
+                "latency_ms": latency_ms, "http_status": status,
+                "halt_reason": "http_error",
+            })
+            close_trace()
+            return {
+                "status": "error",
+                "http_code": status,
+                "error": body if isinstance(body, str) else json.dumps(body)[:1000],
+                "elapsed_sec": round(time.time() - t0, 2),
+                "halt_reason": "http_error",
+                "steps_taken": step - 1,
+                "tool_calls": tool_call_count,
+                "usage": total_usage,
+            }
+
+        choice = (body.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason")
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls") or []
+
+        usage = body.get("usage") or {}
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if usage.get(k) is not None:
+                total_usage[k] += usage[k]
+        ctd = usage.get("completion_tokens_details") or {}
+        if ctd.get("reasoning_tokens") is not None:
+            total_usage["reasoning_tokens"] += ctd["reasoning_tokens"]
+        if usage.get("cost") is not None:
+            total_usage["cost"] += usage["cost"]
+
+        if total_usage["cost"] > max_cost:
+            halt_reason = "cost_budget"
+            final_content = content
+            write_trace({
+                "step": step, "phase": "cost_cap",
+                "finish_reason": finish_reason, "tool": None,
+                "args_summary": None, "result_size_chars": len(content),
+                "latency_ms": latency_ms,
+                "running_cost": round(total_usage["cost"], 6),
+                "halt_reason": halt_reason,
+            })
+            break
+
+        # Append the assistant message verbatim so subsequent tool messages
+        # reference the right tool_call_id.
+        assistant_msg: dict = {"role": "assistant", "content": content}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        if tool_calls:
+            tool_call_count += len(tool_calls)
+            parse_failed = False
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                tool_name = fn.get("name") or ""
+                args_raw = fn.get("arguments") or "{}"
+                tc_id = tc.get("id") or ""
+                t_tool = time.time()
+                try:
+                    args = (
+                        json.loads(args_raw) if isinstance(args_raw, str)
+                        else args_raw
+                    )
+                except json.JSONDecodeError:
+                    parse_failed = True
+                    err_msg = (
+                        f"[parse error] arguments was not valid JSON: "
+                        f"{args_raw[:500]}"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": err_msg,
+                    })
+                    write_trace({
+                        "step": step, "phase": "tool_call",
+                        "finish_reason": finish_reason, "tool": tool_name,
+                        "args_summary": str(args_raw)[:200],
+                        "result_size_chars": len(err_msg),
+                        "latency_ms": int((time.time() - t_tool) * 1000),
+                        "error": "parse_error",
+                    })
+                    continue
+
+                if tool_name not in CURATED_TOOLS:
+                    err_msg = (
+                        f"[error] tool {tool_name!r} is not in the "
+                        f"curated set"
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": err_msg,
+                    })
+                    write_trace({
+                        "step": step, "phase": "tool_call",
+                        "finish_reason": finish_reason, "tool": tool_name,
+                        "args_summary": _summarize_args(args),
+                        "result_size_chars": len(err_msg),
+                        "latency_ms": int((time.time() - t_tool) * 1000),
+                        "error": "non_curated_tool",
+                    })
+                    continue
+
+                try:
+                    result = await session.call_tool(tool_name, args)
+                    text = _serialize_mcp_result(result)
+                    if tool_name == "read_file":
+                        fp = args.get("relative_path", "")
+                        file_read_counter[fp] += 1
+                        reads = file_read_counter[fp]
+                        if reads >= _MAX_FILE_READS:
+                            text += (
+                                f"\n\n[HARNESS NOTE: You have read '{fp}' "
+                                f"{reads} times. You appear to be in a loop. "
+                                "Stop exploring — write your findings in the "
+                                "required format now.]"
+                            )
+                    err = None
+                except Exception as e:  # noqa: BLE001 — MCP errors vary by transport
+                    text = f"[mcp error] {type(e).__name__}: {e}"
+                    err = type(e).__name__
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": text or "[empty result]",
+                })
+                write_trace({
+                    "step": step, "phase": "tool_call",
+                    "finish_reason": finish_reason, "tool": tool_name,
+                    "args_summary": _summarize_args(args),
+                    "result_size_chars": len(text),
+                    "latency_ms": int((time.time() - t_tool) * 1000),
+                    "error": err,
+                })
+
+            if parse_failed:
+                halt_reason = "tool_call_parse_error"
+                final_content = content
+                break
+            if finish_reason == "tool_calls":
+                continue
+            continue
+
+        # No tool_calls in this turn → final answer.
+        final_content = content
+        if finish_reason == "length":
+            halt_reason = "content_truncated"
+        elif finish_reason in ("stop", "content_filter", None):
+            halt_reason = "completed"
+        else:
+            halt_reason = f"unexpected_finish_reason:{finish_reason}"
+        write_trace({
+            "step": step, "phase": "final_answer",
+            "finish_reason": finish_reason, "tool": None,
+            "args_summary": None, "result_size_chars": len(content),
+            "latency_ms": latency_ms,
+            "halt_reason": halt_reason,
+        })
+        break
+    else:
+        halt_reason = "step_budget"
+        final_content = ""
+        write_trace({
+            "step": max_steps, "phase": "step_budget_exhausted",
+            "finish_reason": None, "tool": None,
+            "args_summary": None, "result_size_chars": 0,
+            "latency_ms": 0, "halt_reason": halt_reason,
+        })
+
+    close_trace()
+
+    elapsed = round(time.time() - t0, 2)
+    issues = parse_issues(final_content) if final_content else []
+
+    if tool_call_count == 0 and halt_reason == "completed":
+        halt_reason = (
+            "single_shot_with_findings" if issues else "silent_refusal"
+        )
+
+    return {
+        "status": "ok" if halt_reason not in ("http_error",) else "error",
+        "content": final_content,
+        "issues": issues,
+        "issues_count": len(issues),
+        "usage": {
+            "prompt_tokens": total_usage["prompt_tokens"] or None,
+            "completion_tokens": total_usage["completion_tokens"] or None,
+            "total_tokens": total_usage["total_tokens"] or None,
+            "reasoning_tokens": total_usage["reasoning_tokens"] or None,
+            "cost": round(total_usage["cost"], 6) if total_usage["cost"] else None,
+        },
+        "elapsed_sec": elapsed,
+        "tool_calls": tool_call_count,
+        "steps_taken": step,
+        "halt_reason": halt_reason,
+    }
+
+
+# ---------- pipeline orchestration ----------
+
+async def _run_pipeline(
+    args: argparse.Namespace, repo_path: Path, source_commit: str,
+    diff_path: Path | None, trace_dir: Path | None,
+) -> tuple[list[dict], dict, dict]:
+    """Open Serena, optionally run all models, return (tools, results, meta_extra)."""
+    serena_cmd = shlex.split(args.serena_cmd)
+    wt_dir = _make_worktree(repo_path, source_commit)
+    try:
+        async with open_mcp_session(serena_cmd, wt_dir) as (session, tools):
+            if args.list_tools_only:
+                return tools, {}, {}
+
+            assert diff_path is not None
+            diff_text = diff_path.read_text(encoding="utf-8")
+
+            openai_tools = [mcp_to_openai_tool(t) for t in tools]
+            tool_desc_block = render_tool_descriptions(tools)
+            user_prompt = _build_user_prompt(
+                Path(args.prompt), diff_text, tool_desc_block,
+            )
+
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key:
+                raise SystemExit("Error: set OPENROUTER_API_KEY")
+
+            available_models = _load_models(Path(args.models_file))
+            if args.models:
+                selected = {n: m for n, m in available_models.items()
+                            if n in args.models}
+                if not selected:
+                    raise SystemExit(
+                        "Error: no matching models. Available:\n"
+                        + "\n".join(f"  - {n}" for n in available_models)
+                    )
+            else:
+                selected = available_models
+
+            print(f"Models: {len(selected)}\n")
+            results: dict[str, dict] = {}
+            for i, (name, model_id) in enumerate(selected.items(), 1):
+                cap = args.cost_cap_overrides.get(model_id, args.max_cost_per_model)
+                print(f"[{i}/{len(selected)}] {name} ({model_id}) "
+                      f"steps<={args.max_steps} cost<=${cap:.2f}...",
+                      end=" ", flush=True)
+                res = await run_agent_loop(
+                    session=session,
+                    model_id=model_id,
+                    model_name=name,
+                    user_prompt=user_prompt,
+                    openai_tools=openai_tools,
+                    api_key=api_key,
+                    max_steps=args.max_steps,
+                    max_cost=cap,
+                    timeout_per_step=args.timeout,
+                    trace_dir=trace_dir,
+                )
+                results[name] = res
+                print(
+                    f"{res.get('halt_reason')} — "
+                    f"{res.get('issues_count', 0)} findings — "
+                    f"{res.get('tool_calls', 0)} tool_calls — "
+                    f"{res['elapsed_sec']}s"
+                )
+            return tools, results, {
+                "tools_curated": [t["name"] for t in tools],
+                "max_steps": args.max_steps,
+                "max_cost_per_model": args.max_cost_per_model,
+                "cost_cap_overrides": args.cost_cap_overrides,
+            }
+    finally:
+        _cleanup_worktree(repo_path, wt_dir)
+
+
+def _build_run_log_path(output_path: Path | None, diff_path: Path) -> Path:
+    if output_path is not None:
+        base = output_path.with_suffix("")
+        base.parent.mkdir(parents=True, exist_ok=True)
+        return base.parent / "run.agentic.log"
+    return diff_path.parent / "run.agentic.log"
+
+
+def main() -> int:
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Agentic Code Review Benchmark via OpenRouter + Serena MCP. "
+            "See docs/plans/2026-05-09-agentic-track.md."
+        )
+    )
+    parser.add_argument("diff", nargs="?",
+                        help="Path to a unified diff file (omit with --list-tools-only)")
+    parser.add_argument("--repo-path", required=True,
+                        help="Local clone of the repo under review (used for worktree + Serena)")
+    parser.add_argument("--source-commit", default=None,
+                        help="Commit SHA for the worktree. Default: parse from diff `source-commit:` line, else HEAD.")
+    parser.add_argument("--serena-cmd", default=DEFAULT_SERENA_CMD,
+                        help=f"Command (shell-split) to start Serena MCP. Default: {DEFAULT_SERENA_CMD!r}")
+    parser.add_argument("--prompt", "-p", default=str(DEFAULT_PROMPT_PATH),
+                        help="Path to the agentic prompt template")
+    parser.add_argument("--models-file", default=str(DEFAULT_MODELS_FILE),
+                        help="JSON {display_name: openrouter_model_id}")
+    parser.add_argument("--models", "-m", nargs="*", default=None,
+                        help="Subset of model display names to run. Default: all.")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Path for the JSON output (default: results_agentic_<timestamp>.json)")
+    parser.add_argument("--timeout", "-t", type=int, default=600,
+                        help="Per-step HTTP timeout in seconds (default: 600)")
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS,
+                        help=f"Hard step budget per model (default: {DEFAULT_MAX_STEPS})")
+    parser.add_argument("--max-cost-per-model", type=float,
+                        default=DEFAULT_MAX_COST_PER_MODEL,
+                        help=f"Hard $ cap per model (default: {DEFAULT_MAX_COST_PER_MODEL})")
+    parser.add_argument("--cost-cap-overrides", type=_parse_cost_overrides,
+                        default={},
+                        help='Per-model cost cap overrides: "anthropic/claude-opus-4-7=3.0,..."')
+    parser.add_argument("--list-tools-only", action="store_true",
+                        help="Connect to Serena, print the curated tool list, then exit (A1.1 DoD).")
+    args = parser.parse_args()
+
+    repo_path = Path(args.repo_path).resolve()
+    if not (repo_path / ".git").exists():
+        print(f"Error: --repo-path is not a git repo: {repo_path}", file=sys.stderr)
+        return 2
+
+    if not args.list_tools_only and not args.diff:
+        parser.error("diff path is required unless --list-tools-only is used")
+
+    diff_path = Path(args.diff).resolve() if args.diff else None
+    source_commit = args.source_commit or (
+        _detect_source_commit(diff_path, repo_path) if diff_path
+        else subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    )
+
+    serena_cmd = shlex.split(args.serena_cmd)
+    serena_version = _resolve_serena_version(serena_cmd)
+
+    log_path = _build_run_log_path(
+        Path(args.output) if args.output else None,
+        diff_path or repo_path / "input.diff",
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    timestamp_iso = datetime.now(timezone.utc).isoformat()
+    log_lines = [
+        f"[{timestamp_iso}] agentic harness start",
+        f"  repo_path: {repo_path}",
+        f"  source_commit: {source_commit}",
+        f"  serena_cmd: {serena_cmd}",
+        f"  serena_version: {serena_version}",
+        f"  curated_tools: {list(CURATED_TOOLS)}",
+        f"  max_steps: {args.max_steps}",
+        f"  max_cost_per_model: {args.max_cost_per_model}",
+        f"  cost_cap_overrides: {args.cost_cap_overrides}",
+    ]
+    log_text = "\n".join(log_lines) + "\n"
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(log_text)
+    print(log_text, end="")
+
+    timestamp_short = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    output_path = (
+        Path(args.output) if args.output
+        else Path(f"results_agentic_{timestamp_short}.json")
+    )
+    trace_dir = output_path.with_suffix("")  # results_agentic_<ts>/<model>.trace.jsonl
+
+    tools, results, meta_extra = asyncio.run(
+        _run_pipeline(args, repo_path, source_commit, diff_path, trace_dir)
+    )
+
+    print(f"\nDiscovered {len(tools)} curated tools (expected {len(CURATED_TOOLS)}):")
+    for t in tools:
+        desc = (t["description"] or "").splitlines()[0] if t["description"] else ""
+        print(f"  - {t['name']}: {desc[:80]}")
+
+    if len(tools) != len(CURATED_TOOLS):
+        missing = set(CURATED_TOOLS) - {t["name"] for t in tools}
+        print(f"\nWarning: missing curated tools: {sorted(missing)}",
+              file=sys.stderr)
+
+    if args.list_tools_only:
+        return 0 if len(tools) == len(CURATED_TOOLS) else 1
+
+    output_data = {
+        "meta": {
+            "track": "agentic",
+            "diff_file": str(diff_path) if diff_path else None,
+            "diff_size_chars": (
+                diff_path.read_text(encoding="utf-8").__len__()
+                if diff_path else 0
+            ),
+            "source_commit": source_commit,
+            "prompt_template": str(Path(args.prompt)),
+            "models_file": str(Path(args.models_file)),
+            "timestamp": timestamp_short,
+            "models_count": len(results),
+            "serena_version": serena_version,
+            "serena_cmd": serena_cmd,
+            **meta_extra,
+            **_compute_meta_totals(results),
+        },
+        "results": results,
+    }
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    md_dir = output_path.with_suffix("")
+    save_per_model_markdown(md_dir, results)
+
+    print(f"\nJSON: {output_path}")
+    print(f"Per-model markdown: {md_dir}/")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

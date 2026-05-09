@@ -1,0 +1,5 @@
+{
+  "_comment": "Models confirmed to support OpenRouter function-calling (tool use) for the agentic track. Initial seed for smoke testing — A0.3 probe script will expand this to the full vetted set. Keys starting with `_` are skipped.",
+
+  "DeepSeek V4 Flash": "deepseek/deepseek-v4-flash"
+}

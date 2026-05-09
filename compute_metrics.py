@@ -175,10 +175,23 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     has_reasoning = any(
         info.get("reasoning_tokens") for info in cost_data.values()
     )
+    # Detect agentic-track input via per-model halt_reason / tool_calls
+    # (added by code_review_benchmark_agent.py, never present in bounded).
+    is_agentic = any(
+        info.get("halt_reason") is not None for info in cost_data.values()
+    )
     out = []
-    out.append("# Code Review Benchmark — Leaderboard\n")
+    title = "# Code Review Benchmark — Leaderboard"
+    if is_agentic:
+        title += " (agentic track)"
+    out.append(title + "\n")
     out.append(f"**Real**: {total_real} · **Smell**: {total_smell} · "
                f"Models: **{len(metrics)}**\n")
+    if is_agentic:
+        out.append(
+            "_Track: **agentic** — model + curated MCP tools (read-only) over "
+            "indexed source. See docs/plans/2026-05-09-agentic-track.md._\n"
+        )
     out.append("Metrics:")
     out.append("- **Recall (real)** — % of real bugs found by the model")
     out.append("- **Precision** — % of its findings that were real/smell (excluding nit and wrong)")
@@ -186,6 +199,11 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     out.append("- **$/real** — cost per real bug found (`*` — estimate)")
     if has_reasoning:
         out.append("- **Reason.** — reasoning tokens (OpenRouter `usage.completion_tokens_details.reasoning_tokens`)")
+    if is_agentic:
+        out.append("- **Tools** — tool_call count across the agent loop")
+        out.append("- **Steps** — agent-loop steps used (cap = harness `--max-steps`)")
+        out.append("- **Halt** — why the loop ended (`completed`, `step_budget`, "
+                   "`cost_budget`, `single_shot_with_findings`, `silent_refusal`, …)")
     out.append("")
 
     header_cols = ["Model", "Real", "Smell", "Nit", "Wrong",
@@ -195,6 +213,9 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
     if has_reasoning:
         header_cols.append("Reason.")
         align_cols.append("---:")
+    if is_agentic:
+        header_cols += ["Tools", "Steps", "Halt"]
+        align_cols += ["---:", "---:", "---"]
     out.append("| " + " | ".join(header_cols) + " |")
     out.append("|" + "|".join(align_cols) + "|")
 
@@ -223,6 +244,13 @@ def render_leaderboard(metrics: dict[str, dict], cost_data: dict[str, dict],
         if has_reasoning:
             reasoning = (cost_info or {}).get("reasoning_tokens")
             row_cells.append(f"{reasoning:,}" if reasoning else "-")
+        if is_agentic:
+            tool_calls = (cost_info or {}).get("tool_calls")
+            steps = (cost_info or {}).get("steps_taken")
+            halt = (cost_info or {}).get("halt_reason") or "-"
+            row_cells.append(str(tool_calls) if tool_calls is not None else "-")
+            row_cells.append(str(steps) if steps is not None else "-")
+            row_cells.append(halt)
         out.append("| " + " | ".join(row_cells) + " |")
 
     out.append("")
@@ -456,6 +484,14 @@ def load_cost_data(cost_estimates: Path, results_json: Path) -> dict[str, dict]:
                     out[key] = entry
             if entry is not None and reasoning is not None:
                 entry["reasoning_tokens"] = reasoning
+            # Agentic-track fields (per A2.3) — present only on agentic runs.
+            for field in ("tool_calls", "halt_reason", "steps_taken"):
+                if field in res:
+                    if entry is None:
+                        entry = {"usd": None, "kind": "agentic_no_cost",
+                                 "source": "results.json/agentic"}
+                        out[key] = entry
+                    entry[field] = res[field]
     return out
 
 
