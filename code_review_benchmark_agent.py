@@ -628,7 +628,7 @@ async def _run_pipeline(
                     f"{res['elapsed_sec']}s"
                 )
                 if i < len(selected):
-                    time.sleep(2)
+                    await asyncio.sleep(2)
             return tools, results, {
                 "tools_curated": [t["name"] for t in tools],
                 "max_steps": args.max_steps,
