@@ -2,24 +2,28 @@
 
 [English](README.md) · [Русский](README.ru.md)
 
-A methodology and tooling for benchmarking LLM code-review quality on a real
-diff: run the same diff through N models, aggregate findings, deduplicate,
-adjudicate, and compute per-model precision / recall / hallucination rate.
+Scripts + methodology to compare how different LLMs do code review.
+Take your diff, run it through N models, pile up the findings, dedupe them,
+label each one with a verdict — and get precision, recall and hallucination
+rate for every model.
 
 Author: Svetlana Meleshkina. Licensed under [MIT](LICENSE).
 
 ## Why
 
-Public LLM-coding benchmarks (SWE-bench, HumanEval, etc.) measure code
-*generation*, not code *review*. Review quality has different failure modes:
-hallucinated bugs, missed real bugs, severity inflation, format
-non-compliance. This repo is a small, opinionated harness for measuring those
-on your own diffs — so you can pick a model for *your* codebase, not a
-leaderboard's.
+Public benchmarks (SWE-bench, HumanEval, etc.) measure code generation.
+Review is a different task and breaks differently: the model invents bugs
+that aren't there, misses real ones, inflates severity, breaks the response
+format.
 
-The methodology deliberately keeps a human-in-the-loop for two judgement
-steps (clustering and per-cluster adjudication). LLMs do the bulk parsing
-work; a person (helped by Claude in chat) makes the calls that matter.
+This repo is a test harness that measures exactly that. On **your** diff,
+so you can pick a model for **your** codebase, not somebody else's
+leaderboard.
+
+Two steps in the pipeline are deliberately kept manual — clustering the
+findings and ruling on each cluster. The parsing and the summing-up are
+done by code. The judgement calls are made by a human (with Claude in chat
+helping).
 
 ## Pipeline
 
@@ -63,22 +67,19 @@ flowchart TD
     class Input,A1,A2,A3,A4,Draft,Out1,Out2,Out3 artifact
 ```
 
-Legend: yellow — LLM calls (OpenRouter or Claude in chat), blue —
-pure-Python (no LLM), pink — human checkpoint. Dashed branches show the
-optional `llm_judge.py` path for users without Claude Code.
+Legend: yellow — LLM calls (OpenRouter or Claude in chat), blue — Python
+without LLM, pink — human checkpoint. Dashed = alternative path through
+`llm_judge.py` for those without Claude Code.
 
-**Design principle:** the bulk Python scripts (parsing, rendering, metrics)
-make zero LLM calls. Anything that needs reasoning (clustering, adjudication)
-is delegated to Claude in the current chat session — typically free under a
-Claude subscription. OpenRouter spend is confined to step 1, where
-third-party models are exercised.
+**Principle:** Python scripts (parsing, rendering, metrics) don't call any
+LLM. Everything that takes reasoning (clustering, adjudication) goes to
+Claude in chat — usually free under your subscription. OpenRouter spend is
+confined to step 1, where third-party models are exercised.
 
-For users without Claude Code there is an optional `llm_judge.py` script
-that runs the clustering and adjudication steps via OpenRouter with a
-configurable judge model. The output is a **draft** (`verdicts.draft.md`)
-that a human still reviews and approves before the metrics step. See
-[Optional: automated drafts via OpenRouter](#optional-automated-drafts-via-openrouter)
-below.
+No Claude Code? There's an optional `llm_judge.py` — it runs clustering
+and adjudication through OpenRouter. Output is a **draft**
+(`verdicts.draft.md`) that you still read through before the metrics step.
+Details [below](#automated-drafts-via-openrouter-optional).
 
 ## Install
 
@@ -86,7 +87,7 @@ below.
 pip install -r requirements.txt
 ```
 
-Get an OpenRouter API key at <https://openrouter.ai/keys>, then:
+OpenRouter API key: <https://openrouter.ai/keys>
 
 ```powershell
 $env:OPENROUTER_API_KEY = "..."   # PowerShell
@@ -95,9 +96,9 @@ $env:OPENROUTER_API_KEY = "..."   # PowerShell
 export OPENROUTER_API_KEY=...     # bash
 ```
 
-## Usage
+## How to use
 
-### 1. Run the benchmark via OpenRouter
+### 1. Run the models via OpenRouter
 
 ```bash
 python code_review_benchmark.py path/to/some.diff \
@@ -106,20 +107,18 @@ python code_review_benchmark.py path/to/some.diff \
   -o runs/<run-id>/results.json
 ```
 
-Produces:
+Output:
 - `results.json` — metadata + raw responses from every model
-- `results/<model>.md` — one markdown review per model
+- `results/<model>.md` — one markdown file per model's review
 
-**Model list:** edit `models.json` (display name → OpenRouter model id), or
-point to a different file with `--models-file PATH`. The repository ships a
-default list to get you started; trim it to suit your OpenRouter quota and
-which families you want to compare.
+**Models.** Default list — `models.json` (display name → OpenRouter model
+id). Trim it to your quota or point to a different file with
+`--models-file PATH`.
 
-**Prompt:** the prompt template lives in `prompts/`. The default is
-`prompts/review.en.txt`; an alternative `prompts/review.ru.txt` is included
-as an example of localising the body while keeping English field markers
-(`Findings:`, `Location:`, …). Override with `--prompt PATH`. The template
-uses two placeholders: `{diff}` and `{context_block}`.
+**Prompt.** Template at `prompts/review.en.txt`. There's also
+`prompts/review.ru.txt` — Russian body with English field markers
+(`Findings:`, `Location:`, …). Use your own with `--prompt PATH`.
+Placeholders: `{diff}` and `{context_block}`.
 
 ### 2. Parse findings
 
@@ -129,10 +128,10 @@ python aggregate_findings.py parse \
   -o findings.json
 ```
 
-### 3. Cluster findings (Claude in chat or `llm_judge.py cluster`)
+### 3. Clustering
 
-Have Claude read `findings.json`, group findings by underlying problem, and
-write `clusters.json`:
+Claude reads `findings.json` and groups findings by the underlying problem.
+Result — `clusters.json`:
 
 ```json
 {
@@ -142,12 +141,11 @@ write `clusters.json`:
 }
 ```
 
-Recipe for Claude in chat: open Claude Code in the run folder and ask:
+**In Claude Code:** open the run folder and say:
 > Read `findings.json`. Group the findings by the same underlying problem
-> (use `prompts/cluster.en.txt` as the rubric). Write the result to
-> `clusters.json` in the schema shown there.
+> (rubric — `prompts/cluster.en.txt`). Write the result to `clusters.json`.
 
-Or run the optional automated path:
+**Or automatically:**
 
 ```bash
 python llm_judge.py cluster \
@@ -156,7 +154,7 @@ python llm_judge.py cluster \
   --judge-model openai/gpt-5.5
 ```
 
-### 4. Render the worklist
+### 4. Build the worklist
 
 ```bash
 python aggregate_findings.py render \
@@ -165,11 +163,10 @@ python aggregate_findings.py render \
   -o worklist.md
 ```
 
-### 5. Adjudicate (Claude in chat or `llm_judge.py adjudicate`)
+### 5. Adjudication
 
-For each cluster, a reviewer reads the source at the cited location and
-assigns a verdict: `real | smell | nit | wrong`, with a short reason. The
-result is `verdicts.md`:
+For each cluster, look at the source at the cited location and assign a
+verdict: `real | smell | nit | wrong`. Result — `verdicts.md`:
 
 ```
 ## Cluster 1
@@ -181,17 +178,16 @@ result is `verdicts.md`:
 ...
 ```
 
-**The human owns the final verdict.** Both paths below produce a draft —
-review and override before saving as `verdicts.md`.
+**The human owns the final verdict.** Both paths below produce a draft.
+Read it through and fix what needs fixing before computing metrics.
 
-Recipe for Claude in chat: open Claude Code in the run folder, point it at
-`worklist.md`, and ask:
-> For each cluster in `worklist.md`, read the source at the cited
-> `Location:` and assign a verdict using the rubric in `prompts/judge.en.txt`.
-> Write the verdicts to `verdicts.md` in the schema shown there.
+**In Claude Code:**
+> For each cluster in `worklist.md` read the source at `Location:` and
+> assign a verdict using the rubric in `prompts/judge.en.txt`. Write to
+> `verdicts.md`.
 
-Or run the optional automated path (produces `verdicts.draft.md`, which you
-review and rename to `verdicts.md`):
+**Or automatically** (output is `verdicts.draft.md` — rename to
+`verdicts.md` after review):
 
 ```bash
 python llm_judge.py adjudicate \
@@ -203,9 +199,9 @@ python llm_judge.py adjudicate \
   --judge-model openai/gpt-5.5
 ```
 
-The draft includes a "Needs human attention" preamble that flags
-low-confidence calls, severity-dissent clusters, and singletons (one model
-only) so you can prioritise what to look at.
+At the top of the draft is a "Needs human attention" preamble listing
+clusters worth a closer look: low-confidence calls, severity disagreement
+between models, singletons (only one model found it).
 
 ### 6. Compute metrics
 
@@ -217,18 +213,18 @@ python compute_metrics.py \
   --results results.json
 ```
 
-Produces:
-- `worklist_judged.md` — the worklist with checkboxes filled and judge notes
-  inlined (useful for human verification, especially low-confidence calls)
-- `leaderboard.md` — per-model precision, recall, hallucination rate, $/real
+Output:
+- `worklist_judged.md` — worklist with `[x]` filled in and judge notes
+  inlined (handy for verification, especially low-confidence clusters)
+- `leaderboard.md` — results table: precision, recall, hallucination rate,
+  $/real per model
 
-### 7. (Optional) Findings report skeleton
+### 7. Narrative report (optional)
 
-Pass `--report runs/<id>/findings_report.md` to `compute_metrics.py` to
-render a narrative-style report skeleton with auto-filled tables (real bugs,
-who-found-what, severity calibration, cost/value) and `<!-- TODO -->` blocks
-for the prose sections (singleton commentary, patterns, methodology
-takeaway). The template lives at `templates/findings_report.template.md`.
+Add `--report` and the script generates a report with auto-filled tables
+(real bugs, who-found-what, severity calibration, cost/value) plus
+`<!-- TODO -->` blocks for your commentary. Template —
+`templates/findings_report.template.md`.
 
 ```bash
 python compute_metrics.py \
@@ -240,26 +236,23 @@ python compute_metrics.py \
   --report      runs/<id>/findings_report.md
 ```
 
-Then a reviewer (you or Claude in chat) fills in the prose
-blocks. This is the document that ties the run together for a paper or a
-team writeup.
+Then you fill in the prose in the `<!-- TODO -->` blocks — for an article
+or an internal team writeup.
 
-## Optional: automated drafts via OpenRouter
+## Automated drafts via OpenRouter (optional)
 
-The default workflow uses Claude in chat for the two LLM-driven steps
-(clustering, adjudication). For users without Claude Code, or for
-reproducibility studies (running multiple judges and comparing), the
-optional `llm_judge.py` script does both via OpenRouter with a configurable
-judge model:
+By default, clustering and adjudication run in Claude chat. If you don't
+have Claude Code, or you want to run several judges for reproducibility —
+there's `llm_judge.py`:
 
 ```bash
-# Step 3 alt
+# Clustering
 python llm_judge.py cluster \
   --findings runs/<id>/findings.json \
   -o runs/<id>/clusters.json \
   --judge-model openai/gpt-5.5
 
-# Step 5 alt — produces verdicts.draft.md, NOT verdicts.md
+# Adjudication — produces verdicts.draft.md, NOT verdicts.md
 python llm_judge.py adjudicate \
   --clusters runs/<id>/clusters.json \
   --findings runs/<id>/findings.json \
@@ -269,53 +262,48 @@ python llm_judge.py adjudicate \
   --judge-model openai/gpt-5.5
 ```
 
-The judge model and clustering rubric are not the same as the methodology
-itself — they live in `prompts/cluster.en.txt` and `prompts/judge.en.txt`.
-Tune them to your codebase before relying on the output.
+Rubrics live in `prompts/cluster.en.txt` and `prompts/judge.en.txt`. Tune
+them to your codebase before relying on the output.
 
-**Trade-offs to be aware of:**
-- LLM-as-judge has known biases (position, length, self-preference). If your
-  judge is from the same family as a model under review, that model gets a
-  small fork. Run multiple judges if reproducibility matters.
-- The judge sees only ±N lines around the cited `Location`, not the whole
-  file or its callers. For bugs whose verdict depends on caller invariants,
-  the judge will (correctly) mark `Confidence: low` and the human reviewer
-  has to walk the call sites.
-- The methodology principle "human owns the final call" still holds: the
-  output is named `verdicts.draft.md` so it cannot be silently fed into
-  metrics. You rename it to `verdicts.md` only after review.
+**Things to remember:**
+- LLM-as-judge has known biases (position, length, self-preference). If
+  the judge is from the same family as a model under review, that model
+  gets a small head start. Run multiple judges for reproducibility.
+- The judge sees only ±N lines around `Location:`, not the whole file or
+  its callsites. If the verdict depends on caller code, the judge will
+  mark `Confidence: low` and you'll need to walk the call sites by hand.
+- The "human owns the final call" principle still holds: the file is
+  named `verdicts.draft.md`. You rename it to `verdicts.md` only after
+  review.
 
 ## Verdict categories
 
 - **real** — a genuine bug with production impact: crash, wrong result,
   degraded behaviour on typical inputs, race, leak, data loss
-- **smell** — code health, won't crash: duplication, bad names, missing docs,
-  DRY violations, asymmetric APIs
+- **smell** — code health, won't crash: duplication, bad names, missing
+  docs, DRY violations, asymmetric APIs
 - **nit** — pure style: whitespace, micro-optimisation, idiomatic preference
 - **wrong** — the model is mistaken: the issue doesn't exist, the code was
-  misread, or the suggestion doesn't apply
+  misread, or the recommendation doesn't apply
 
-Tie-breaker: real/smell → smell, smell/nit → nit, smell/wrong → re-check,
-otherwise smell.
+Disputed cases: real/smell → smell, smell/nit → nit, smell/wrong →
+re-check, otherwise smell.
 
-## Format compliance
+## Format compatibility
 
-Models don't always follow the response format exactly. `aggregate_findings.py`
-ships with an `ISSUE_RE` regex that tolerates the common deviations
-(`**bold**` decoration, `1.` instead of `1)`, severity wrapped in markdown,
-etc.) and a companion `FORMAT_NOTES = {}` dictionary you can populate to
-annotate models whose output parses but with caveats — those notes appear
-next to the model in `worklist.md` so reviewers know to give those findings
-extra scrutiny. The dictionary ships empty; populate it from your own runs.
-See [CONTRIBUTING.md](CONTRIBUTING.md#format-compliance-notes) for the
-mechanics.
+Not every model follows the format perfectly. `aggregate_findings.py` has
+an `ISSUE_RE` regex that's tolerant to the common deviations (`**bold**`,
+`1.` instead of `1)`, severity wrapped in markdown, etc.) plus a
+`FORMAT_NOTES = {}` dictionary for "parses but with caveats" annotations.
+Your notes appear next to the model in `worklist.md` so reviewers give
+those findings a bit of extra scrutiny. Fill it from your own runs;
+mechanics — in
+[CONTRIBUTING.md](CONTRIBUTING.md#format-compliance-notes).
 
-Both parsers (`code_review_benchmark.py` for live API responses, and
-`aggregate_findings.py` for parsing markdown reviews) expect English field
-markers as defined in `prompts/review.en.txt`: `Findings:`, `Location:`,
-`Why it matters:`, `Evidence:`, `Recommendation:`, plus a
-`[severity: blocker/major/minor/nit]` tag. If you replace the markers, update
-the parser regexes accordingly.
+Both parsers expect the English field markers from `prompts/review.en.txt`:
+`Findings:`, `Location:`, `Why it matters:`, `Evidence:`, `Recommendation:`,
+plus `[severity: blocker/major/minor/nit]`. Change the markers — update
+the regexes.
 
 ## Repository layout
 
@@ -325,80 +313,77 @@ ai-code-review-benchmark/
 ├── README.ru.md
 ├── LICENSE
 ├── requirements.txt
-├── code_review_benchmark.py        ← OpenRouter runner
-├── aggregate_findings.py           ← parser + worklist renderer (no LLM)
-├── compute_metrics.py              ← metrics + leaderboard + report (no LLM)
-├── llm_judge.py                    ← optional: automated cluster+adjudicate drafts
-├── models.json                     ← default model list (override with --models-file)
+├── code_review_benchmark.py        ← runner: runs models through OpenRouter
+├── aggregate_findings.py           ← parses findings + builds worklist (no LLM)
+├── compute_metrics.py              ← metrics + results table + report (no LLM)
+├── llm_judge.py                    ← optional: clustering/adjudication drafts
+├── models.json                     ← default model list
 ├── prompts/
 │   ├── review.en.txt               ← reviewer prompt (step 1)
-│   ├── review.ru.txt               ← Russian-body example (English markers)
-│   ├── cluster.en.txt              ← clustering rubric (step 3 — used by llm_judge or Claude in chat)
+│   ├── review.ru.txt               ← Russian body + English markers
+│   ├── cluster.en.txt              ← clustering rubric (step 3)
 │   └── judge.en.txt                ← adjudication rubric (step 5)
 ├── templates/
-│   └── findings_report.template.md ← skeleton for compute_metrics.py --report
-└── runs/                           ← gitignored — your local benchmark runs
-    └── <run-id>/                   ← one run = one folder
-        ├── input.diff              ← the diff under review (for reproducibility)
-        ├── results.json            ← OpenRouter raw output
-        ├── results/                ← per-model .md (OpenRouter)
-        ├── findings.json           ← parsed findings
-        ├── clusters.json           ← clusters (Claude in chat or llm_judge.py cluster)
-        ├── worklist.md             ← worklist for human review
-        ├── verdicts.draft.md       ← (optional) draft from llm_judge.py adjudicate
-        ├── verdicts.md             ← per-cluster verdicts (human-approved)
-        ├── worklist_judged.md      ← worklist + verdicts merged
-        ├── leaderboard.md          ← per-model metrics
-        ├── findings_report.md      ← (optional) narrative report (--report)
-        └── run.log                 ← stdout of the run
+│   └── findings_report.template.md ← skeleton for --report
+└── runs/                           ← .gitignored — local runs
+    └── <run-id>/
+        ├── input.diff
+        ├── results.json
+        ├── results/
+        ├── findings.json
+        ├── clusters.json
+        ├── worklist.md
+        ├── verdicts.draft.md
+        ├── verdicts.md
+        ├── worklist_judged.md
+        ├── leaderboard.md
+        ├── findings_report.md
+        └── run.log
 ```
 
-**Run id convention:** `runs/<short-id>/` — the id can be a ticket
-(`PROJ-1234`), a feature name (`auth-refactor`), or a date
-(`2026-05-09-deepseek-only`). Keep all artefacts of a single run inside one
-folder; pass `--output runs/<id>/...` to the scripts.
+**Run id:** `runs/<short-id>/` — a ticket (`PROJ-1234`), a feature
+(`auth-refactor`) or a date (`2026-05-09-deepseek-only`). All artefacts of
+one run live in one folder.
 
-`runs/` is gitignored by default so that runs against private code never leak
-into the public repository. Remove that line from `.gitignore` only if a
-specific run is fully public.
+`runs/` is in `.gitignore` so runs against private code don't leak into
+the public repo. Drop the line only if the run is fully public.
 
 ## Files
 
-### Scripts (in this repo)
+### Scripts
 
-| File | Format / what it is | Producer |
+| File | What it does |
+|---|---|
+| `code_review_benchmark.py` | Runner: runs models through OpenRouter (step 1) |
+| `aggregate_findings.py` | Parses findings + builds the worklist; doesn't call any LLM |
+| `compute_metrics.py` | Metrics + results table + findings_report; doesn't call any LLM |
+| `llm_judge.py` | Optional: drafts clustering and adjudication via OpenRouter |
+| `models.json` | `{display_name: openrouter_model_id}`; keys starting with `_` are comments |
+| `prompts/review.en.txt` | Step 1 prompt; placeholders `{diff}`, `{context_block}` |
+| `prompts/review.ru.txt` | Russian body + English markers |
+| `prompts/cluster.en.txt` | Step 3 rubric; placeholder `{findings_block}` |
+| `prompts/judge.en.txt` | Step 5 rubric; placeholders `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}` |
+| `templates/findings_report.template.md` | Skeleton with `{TOKEN}` placeholders and `<!-- TODO -->` blocks |
+
+### Run artefacts (`runs/<run-id>/`)
+
+| File | What it is | Producer |
 |---|---|---|
-| `code_review_benchmark.py` | Python — OpenRouter runner; calls LLMs (step 1) | this repo |
-| `aggregate_findings.py` | Python — parser + worklist renderer; no LLM calls | this repo |
-| `compute_metrics.py` | Python — metrics + leaderboard + (optional) findings_report; no LLM calls | this repo |
-| `llm_judge.py` | Python — optional; calls OpenRouter for steps 4 + 6 | this repo |
-| `models.json` | JSON — `{display_name: openrouter_model_id}`; keys starting with `_` are comments | this repo (override with `--models-file`) |
-| `prompts/review.en.txt` · `review.ru.txt` | Step 1 prompt; placeholders `{diff}` and `{context_block}` | this repo (override with `--prompt`) |
-| `prompts/cluster.en.txt` | Step 3 rubric; placeholder `{findings_block}`. Ships with usable defaults; the `<!-- TODO -->` block is a place for codebase-specific tuning, not a blocker. | this repo |
-| `prompts/judge.en.txt` | Step 5 rubric; placeholders `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Ships with usable defaults; the `<!-- TODO -->` block is a place for codebase-specific tuning, not a blocker. | this repo |
-| `templates/findings_report.template.md` | Markdown skeleton with `{TOKEN}` placeholders for auto-filled tables and `<!-- TODO -->` blocks for human prose | this repo (override with `--report-template`) |
+| `input.diff` | Unified diff | you (`git diff > input.diff`) |
+| `results.json` | Metadata + raw model responses. Per-model `cost` and `reasoning_tokens` from OpenRouter (may be `null`). | `code_review_benchmark.py` |
+| `results/<model>.md` | One model's review: `Findings:` with numbered items and sub-items `Location:`, `Why it matters:`, `Evidence:`, `Recommendation:` | `code_review_benchmark.py` |
+| `findings.json` | `{issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}]}` | `aggregate_findings.py parse` |
+| `clusters.json` | `{clusters: [{id, topic, consensus_severity, members: [int]}]}` | Claude in chat / `llm_judge.py cluster` |
+| `worklist.md` | Clusters with `[ ]` checkboxes, ready for labelling | `aggregate_findings.py render` |
+| `verdicts.draft.md` | Draft verdicts + "Needs human attention" preamble. After review → `verdicts.md` | `llm_judge.py adjudicate` |
+| `verdicts.md` | Per-cluster verdicts (`## Cluster N`, `Verdict:`, `Confidence:`, `Reason:`) | Claude in chat / human review of the draft |
+| `worklist_judged.md` | Worklist with `[x]` and judge notes | `compute_metrics.py` |
+| `leaderboard.md` | Precision, recall, hallucination rate, $/real | `compute_metrics.py` |
+| `findings_report.md` | Narrative report with tables and `<!-- TODO -->` blocks for prose | `compute_metrics.py --report` |
+| `cost_estimates.json` | **Override only.** Cost is normally read from `results.json`. This file is for models routed outside OpenRouter, or when `usage.cost` is `null`. Keys are sanitised names: `re.sub(r"[^\w\-]+", "_", name)` | you (optional) |
+| `run.log` | Stdout of step 1 | `code_review_benchmark.py` |
 
-### Run artefacts (under `runs/<run-id>/`)
+## How to contribute
 
-Everything below is created by the pipeline for one run.
-
-| File | Schema | Producer |
-|---|---|---|
-| `input.diff` | Unified diff text | user (`git diff > input.diff`) |
-| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ..., total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, total_cost_actual_usd, total_cost_estimated_usd}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. Per-model `cost` and `reasoning_tokens` come from OpenRouter's `usage.include` response and may be `null` for providers that don't report them; `meta.total_*` aggregate across all `ok` results. | `code_review_benchmark.py` |
-| `results/<model>.md` | Markdown — `Findings:` block of numbered items: `N) [severity: blocker\|major\|minor\|nit] summary` followed by `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
-| `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
-| `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx into issues[]>]}] }` | Claude in chat — or `llm_judge.py cluster` |
-| `worklist.md` | Markdown — clusters with `[ ]` checkboxes (`real` / `smell` / `nit` / `wrong`) ready for human labelling | `aggregate_findings.py render` |
-| `verdicts.draft.md` | Markdown — same shape as `verdicts.md` plus a "Needs human attention" preamble. **Optional**, for review only — rename to `verdicts.md` after editing. | `llm_judge.py adjudicate` |
-| `verdicts.md` | Markdown — for each cluster: `## Cluster N` then `- Verdict:`, `- Confidence:`, `- Reason:` | Claude in chat (per-cluster, source-aware) — or human review of `verdicts.draft.md` |
-| `worklist_judged.md` | Markdown — `worklist.md` with `[x]` filled in and judge notes inlined | `compute_metrics.py` |
-| `leaderboard.md` | Markdown — per-model precision / recall / hallucination rate / $/real | `compute_metrics.py` |
-| `findings_report.md` | Markdown — narrative report skeleton with auto-filled tables (real bugs, who found what, severity calibration, cost/value) plus `<!-- TODO -->` blocks for prose | `compute_metrics.py --report` (then human prose) |
-| `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind} }` — **override only**. Cost is normally read directly from `results.json` (`usage.cost` populated by OpenRouter). Use this file only to override or supplement (e.g. for models routed outside OpenRouter, or when `usage.cost` is `null`). Keys are sanitised model names: `re.sub(r"[^\w\-]+", "_", display_name)` (e.g. `"GPT-5.4"` → `"GPT-5_4"`). | user (optional; manual override) |
-| `run.log` | Plain text — stdout of step 1 | `code_review_benchmark.py` (redirect) |
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a model, change the
-prompt, or update the parser regexes when you change response markers.
+[CONTRIBUTING.md](CONTRIBUTING.md) — how to add a model, tweak the prompt,
+or update the parser regexes.
