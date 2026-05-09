@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -179,7 +180,7 @@ def call_model(
 
 ISSUE_HEADER_RE = re.compile(
     r"^[ \t]*(\d+)\)[ \t]*"
-    r"(?:\[severity:[ \t]*([^\]]+)\])?[ \t]*(.*)$",
+    r"(?:\[(?:severity:[ \t]*)?(blocker|major|minor|nit)\])?[ \t]*(.*)$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -353,6 +354,51 @@ def save_per_model_markdown(out_dir: Path, results: dict):
         path.write_text(header + (res.get("content") or ""), encoding="utf-8")
 
 
+def _git_info(path: str | Path) -> dict | None:
+    """Return {repo_root, commit, branch, dirty} for a path inside a git repo.
+
+    Records the state of the codebase at review time so a run can be
+    reproduced or compared later. Returns None if the path is not in a git
+    repo or git is unavailable.
+    """
+    p = Path(path)
+    work_dir = p.parent if p.exists() and p.is_file() else p
+    if not work_dir.exists():
+        return None
+    try:
+        def run(*args):
+            return subprocess.check_output(
+                ["git", "-C", str(work_dir), *args],
+                stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        if p.exists() and p.is_file():
+            run("ls-files", "--error-unmatch", str(p))
+        repo_root = run("rev-parse", "--show-toplevel")
+        commit = run("rev-parse", "HEAD")
+        branch = run("rev-parse", "--abbrev-ref", "HEAD")
+        dirty = bool(run("status", "--porcelain", str(p)))
+        return {"repo_root": repo_root, "commit": commit, "branch": branch, "dirty": dirty}
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+
+
+def _detect_source_commit(diff_path: Path, context_files: list) -> dict | None:
+    """Detect git state of the codebase under review.
+
+    Tries the diff path first, then each context file, returns the first
+    successful git_info. If context files span multiple repos, only the first
+    is recorded — bench assumes a single source repo per run.
+    """
+    info = _git_info(diff_path)
+    if info:
+        return info
+    for path, _ in context_files:
+        info = _git_info(path)
+        if info:
+            return info
+    return None
+
+
 def _compute_meta_totals(results: dict) -> dict:
     """Aggregate per-model usage into run-level totals for results.json meta.
 
@@ -509,6 +555,7 @@ def main():
             "diff_size_chars": len(diff_text),
             "context_files": [p for p, _ in context_files],
             "context_size_chars": sum(len(c) for _, c in context_files),
+            "source_commit": _detect_source_commit(diff_path, context_files),
             "prompt_template": str(prompt_path),
             "models_file": str(models_file),
             "timestamp": timestamp,
