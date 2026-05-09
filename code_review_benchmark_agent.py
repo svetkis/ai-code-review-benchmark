@@ -173,9 +173,9 @@ def _cleanup_worktree(repo_path: Path, wt_dir: Path) -> None:
 
 
 async def _cleanup_worktree_async(repo_path: Path, wt_dir: Path) -> None:
-    await asyncio.get_event_loop().run_in_executor(
-        None, _cleanup_worktree, repo_path, wt_dir
-    )
+    """Non-blocking wrapper for _cleanup_worktree."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _cleanup_worktree, repo_path, wt_dir)
 
 
 def _resolve_serena_version(serena_cmd: list[str]) -> str:
@@ -645,7 +645,12 @@ async def _run_pipeline(
             }
     finally:
         if wt_dir is not None:
-            await _cleanup_worktree_async(repo_path, wt_dir)
+            try:
+                await asyncio.shield(
+                    _cleanup_worktree_async(repo_path, wt_dir)
+                )
+            except Exception:
+                pass
 
 
 def _build_run_log_path(output_path: Path | None, diff_path: Path) -> Path:
