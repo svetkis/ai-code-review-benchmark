@@ -320,8 +320,8 @@ ai-code-review-benchmark/
 ├── prompts/
 │   ├── review.en.txt               ← reviewer prompt (step 1)
 │   ├── review.ru.txt               ← Russian-body example (English markers)
-│   ├── cluster.en.txt              ← clustering rubric (step 4 — used by llm_judge or Claude in chat)
-│   └── judge.en.txt                ← adjudication rubric (step 6)
+│   ├── cluster.en.txt              ← clustering rubric (step 3 — used by llm_judge or Claude in chat)
+│   └── judge.en.txt                ← adjudication rubric (step 5)
 ├── templates/
 │   └── findings_report.template.md ← skeleton for compute_metrics.py --report
 └── runs/                           ← gitignored — your local benchmark runs
@@ -361,8 +361,8 @@ specific run is fully public.
 | `llm_judge.py` | Python — optional; calls OpenRouter for steps 4 + 6 | this repo |
 | `models.json` | JSON — `{display_name: openrouter_model_id}`; keys starting with `_` are comments | this repo (override with `--models-file`) |
 | `prompts/review.en.txt` · `review.ru.txt` | Step 1 prompt; placeholders `{diff}` and `{context_block}` | this repo (override with `--prompt`) |
-| `prompts/cluster.en.txt` | Step 4 rubric; placeholder `{findings_block}`. Edit the TODO block to encode your clustering rules. | this repo |
-| `prompts/judge.en.txt` | Step 6 rubric; placeholders `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Edit the TODO block to encode your verdict criteria. | this repo |
+| `prompts/cluster.en.txt` | Step 3 rubric; placeholder `{findings_block}`. Ships with usable defaults; the `<!-- TODO -->` block is a place for codebase-specific tuning, not a blocker. | this repo |
+| `prompts/judge.en.txt` | Step 5 rubric; placeholders `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Ships with usable defaults; the `<!-- TODO -->` block is a place for codebase-specific tuning, not a blocker. | this repo |
 | `templates/findings_report.template.md` | Markdown skeleton with `{TOKEN}` placeholders for auto-filled tables and `<!-- TODO -->` blocks for human prose | this repo (override with `--report-template`) |
 
 ### Run artefacts (under `runs/<run-id>/`)
@@ -372,7 +372,7 @@ Everything below is created by the pipeline for one run.
 | File | Schema | Producer |
 |---|---|---|
 | `input.diff` | Unified diff text | user (`git diff > input.diff`) |
-| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens}, elapsed_sec} } }` | `code_review_benchmark.py` |
+| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. `cost` and `reasoning_tokens` come from OpenRouter's `usage.include` response and may be `null` for providers that don't report them. | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — `Findings:` block of numbered items: `N) [severity: blocker\|major\|minor\|nit] summary` followed by `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx into issues[]>]}] }` | Claude in chat — or `llm_judge.py cluster` |
@@ -382,7 +382,7 @@ Everything below is created by the pipeline for one run.
 | `worklist_judged.md` | Markdown — `worklist.md` with `[x]` filled in and judge notes inlined | `compute_metrics.py` |
 | `leaderboard.md` | Markdown — per-model precision / recall / hallucination rate / $/real | `compute_metrics.py` |
 | `findings_report.md` | Markdown — narrative report skeleton with auto-filled tables (real bugs, who found what, severity calibration, cost/value) plus `<!-- TODO -->` blocks for prose | `compute_metrics.py --report` (then human prose) |
-| `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind: "actual"\|"estimated"\|"estimated_anthropic"} }` (optional, for `$/real`) | user (manual; from OpenRouter dashboard or public per-token tariffs) |
+| `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind} }` — **override only**. Cost is normally read directly from `results.json` (`usage.cost` populated by OpenRouter). Use this file only to override or supplement (e.g. for models routed outside OpenRouter, or when `usage.cost` is `null`). Keys are sanitised model names: `re.sub(r"[^\w\-]+", "_", display_name)` (e.g. `"GPT-5.4"` → `"GPT-5_4"`). | user (optional; manual override) |
 | `run.log` | Plain text — stdout of step 1 | `code_review_benchmark.py` (redirect) |
 
 ## Contributing

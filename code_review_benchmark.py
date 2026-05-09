@@ -123,6 +123,7 @@ def call_model(
         ],
         "max_tokens": 8000,
         "temperature": 0.0,
+        "usage": {"include": True},
     }
 
     t0 = time.time()
@@ -144,7 +145,8 @@ def call_model(
         content = (
             data.get("choices", [{}])[0].get("message", {}).get("content", "")
         )
-        usage = data.get("usage", {})
+        usage = data.get("usage", {}) or {}
+        completion_details = usage.get("completion_tokens_details") or {}
 
         issues = parse_issues(content)
 
@@ -157,6 +159,8 @@ def call_model(
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
                 "total_tokens": usage.get("total_tokens"),
+                "cost": usage.get("cost"),
+                "reasoning_tokens": completion_details.get("reasoning_tokens"),
             },
             "elapsed_sec": elapsed,
         }

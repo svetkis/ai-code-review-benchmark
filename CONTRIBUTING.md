@@ -85,15 +85,19 @@ your own observations.
 ## Tune the clustering and judge prompts
 
 The optional `llm_judge.py` script delegates the methodology decisions to
-two prompt files, both of which ship with TODO blocks you should fill in
-before relying on the output:
+two prompt files. Both ship with usable defaults — try them as-is on your
+first run, then refine based on what you see. The `<!-- TODO -->` block
+inside each file is a place to encode codebase-specific rules; it is not
+a blocker for getting the pipeline going.
 
 - `prompts/cluster.en.txt` — what counts as "the same problem"; how to
   pick `consensus_severity` when models disagree; whether to keep
-  singletons or drop them. Replace the `<!-- TODO ... -->` block with 5–10
-  lines of explicit rules drawn from your own runs.
+  singletons or drop them. The defaults inside the TODO block are sensible
+  starting points; replace or extend them with 5–10 lines of explicit
+  rules drawn from your own runs once you have feedback.
 - `prompts/judge.en.txt` — the bar for `real / smell / nit / wrong`, and
-  when to mark `Confidence: low`. Same shape: replace the TODO block.
+  when to mark `Confidence: low`. Same shape: refine the TODO block once
+  you see how the defaults behave on your codebase.
 
 The placeholders the runner fills in are documented at the top of each
 template. **Do not change the placeholder names** unless you also adjust

@@ -318,8 +318,8 @@ ai-code-review-benchmark/
 ├── prompts/
 │   ├── review.en.txt               ← промт ревьюера (шаг 1)
 │   ├── review.ru.txt               ← пример с русским телом и английскими маркерами
-│   ├── cluster.en.txt              ← рубрика кластеризации (шаг 4 — для llm_judge или Claude в чате)
-│   └── judge.en.txt                ← рубрика судейства (шаг 6)
+│   ├── cluster.en.txt              ← рубрика кластеризации (шаг 3 — для llm_judge или Claude в чате)
+│   └── judge.en.txt                ← рубрика судейства (шаг 5)
 ├── templates/
 │   └── findings_report.template.md ← скелет для compute_metrics.py --report
 └── runs/                           ← в .gitignore — твои локальные прогоны
@@ -359,8 +359,8 @@ ai-code-review-benchmark/
 | `llm_judge.py` | Python — опционально; зовёт OpenRouter для шагов 4 и 6 | этот репо |
 | `models.json` | JSON — `{display_name: openrouter_model_id}`; ключи на `_` считаются комментариями | этот репо (перебивается `--models-file`) |
 | `prompts/review.en.txt` · `review.ru.txt` | Промт шага 1; плейсхолдеры `{diff}` и `{context_block}` | этот репо (перебивается `--prompt`) |
-| `prompts/cluster.en.txt` | Рубрика шага 4; плейсхолдер `{findings_block}`. Заполни TODO-блок своими правилами кластеризации. | этот репо |
-| `prompts/judge.en.txt` | Рубрика шага 6; плейсхолдеры `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Заполни TODO-блок своими критериями вердиктов. | этот репо |
+| `prompts/cluster.en.txt` | Рубрика шага 3; плейсхолдер `{findings_block}`. Поставляется с рабочими дефолтами; `<!-- TODO -->` блок — место для тюнинга под свою кодбазу, не блокер. | этот репо |
+| `prompts/judge.en.txt` | Рубрика шага 5; плейсхолдеры `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}`. Поставляется с рабочими дефолтами; `<!-- TODO -->` блок — место для тюнинга под свою кодбазу, не блокер. | этот репо |
 | `templates/findings_report.template.md` | Markdown-скелет с `{TOKEN}` плейсхолдерами под автозаполнение и `<!-- TODO -->` блоками под человеческую прозу | этот репо (перебивается `--report-template`) |
 
 ### Артефакты прогона (внутри `runs/<run-id>/`)
@@ -370,7 +370,7 @@ ai-code-review-benchmark/
 | Файл | Схема | Кто создаёт |
 |---|---|---|
 | `input.diff` | Unified diff (текст) | пользователь (`git diff > input.diff`) |
-| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens}, elapsed_sec} } }` | `code_review_benchmark.py` |
+| `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens, cost, reasoning_tokens}, elapsed_sec} } }`. `cost` и `reasoning_tokens` приходят из ответа OpenRouter (включены через `usage.include`); могут быть `null` для провайдеров, которые их не отдают. | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — блок `Findings:` с пронумерованными пунктами: `N) [severity: blocker\|major\|minor\|nit] summary` и подпунктами `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx в issues[]>]}] }` | Claude в чате — или `llm_judge.py cluster` |
@@ -380,7 +380,7 @@ ai-code-review-benchmark/
 | `worklist_judged.md` | Markdown — `worklist.md` с проставленными `[x]` и заметками судьи | `compute_metrics.py` |
 | `leaderboard.md` | Markdown — per-model precision / recall / hallucination rate / $/real | `compute_metrics.py` |
 | `findings_report.md` | Markdown — нарративный отчёт со заполненными таблицами (real-баги, кто что нашёл, severity calibration, cost/value) и `<!-- TODO -->` блоками под прозу | `compute_metrics.py --report` (затем человеческая проза) |
-| `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind: "actual"\|"estimated"\|"estimated_anthropic"} }` (опционально, нужен для `$/real`) | пользователь (вручную; из OpenRouter dashboard или публичных тарифов) |
+| `cost_estimates.json` | JSON — `{ <model>: {usd, source, kind} }` — **только override**. Cost обычно читается напрямую из `results.json` (`usage.cost` заполняется OpenRouter). Этот файл нужен только чтобы переопределить или дополнить (например, для моделей, гонянных вне OpenRouter, или когда `usage.cost` равен `null`). Ключи — санитизированные имена моделей: `re.sub(r"[^\w\-]+", "_", display_name)` (например `"GPT-5.4"` → `"GPT-5_4"`). | пользователь (опционально; ручной override) |
 | `run.log` | Plain text — stdout шага 1 | `code_review_benchmark.py` (через redirect) |
 
 ## Контрибьюшн

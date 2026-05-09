@@ -2,8 +2,8 @@
 """
 llm_judge.py — Optional automated draft for the two LLM-driven steps.
 
-The default workflow uses Claude in the chat session for clustering (step 4)
-and adjudication (step 6). This script exists for users without Claude Code,
+The default workflow uses Claude in the chat session for clustering (step 3)
+and adjudication (step 5). This script exists for users without Claude Code,
 or for reproducibility studies (running multiple judge models and comparing).
 
 The output of `adjudicate` is `verdicts.draft.md` — NOT `verdicts.md`. A
@@ -13,13 +13,13 @@ disagree with, and save the result as `verdicts.md` before running
 that flags low-confidence, severity-dissent, and singleton clusters first.
 
 Usage:
-  # Step 4 alt — automated clustering
+  # Step 3 alt — automated clustering
   python llm_judge.py cluster \\
       --findings findings.json \\
       -o clusters.json \\
       --judge-model openai/gpt-5.5
 
-  # Step 6 alt — automated adjudication draft
+  # Step 5 alt — automated adjudication draft
   python llm_judge.py adjudicate \\
       --clusters clusters.json \\
       --findings findings.json \\
@@ -106,7 +106,7 @@ def sev_index(sev: str | None) -> int | None:
     return None
 
 
-# ── Step 4: clustering ──────────────────────────────────────────────────────
+# ── Step 3: clustering ──────────────────────────────────────────────────────
 
 def render_findings_block(issues: list[dict]) -> str:
     """Compact text rendering of findings, indexed for the model to reference."""
@@ -183,7 +183,7 @@ def cmd_cluster(args) -> None:
     print(f"Clusters: {len(clusters)} → {args.output}")
 
 
-# ── Step 6: source excerpt ──────────────────────────────────────────────────
+# ── Step 5: source excerpt ──────────────────────────────────────────────────
 
 LOCATION_FILE_LINE_RE = re.compile(r"([\w./\\\-]+\.\w{1,5}):(\d+)")
 
@@ -256,7 +256,7 @@ def build_source_excerpt(
     return f"--- {src_path}:{start}-{end} (cited line: {line}) ---\n{body}", "available"
 
 
-# ── Step 6: per-cluster adjudication ────────────────────────────────────────
+# ── Step 5: per-cluster adjudication ────────────────────────────────────────
 
 def render_cluster_findings(members: list[dict]) -> str:
     out = []
