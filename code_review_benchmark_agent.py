@@ -646,11 +646,9 @@ async def _run_pipeline(
     finally:
         if wt_dir is not None:
             try:
-                await asyncio.shield(
-                    _cleanup_worktree_async(repo_path, wt_dir)
-                )
-            except Exception:
-                pass
+                _cleanup_worktree(repo_path, wt_dir)
+            except Exception as exc:
+                print(f"[warn] worktree cleanup failed for {wt_dir}: {exc}", file=sys.stderr)
 
 
 def _build_run_log_path(output_path: Path | None, diff_path: Path) -> Path:
