@@ -26,13 +26,9 @@ work; a person (helped by Claude in chat) makes the calls that matter.
 ```
 [diff + context files]
         ↓
-1. code_review_benchmark.py     ← OpenRouter, N models in parallel
+1. code_review_benchmark.py     ← OpenRouter, N models sequentially
         ↓
    results.json + results/<model>.md
-        ↓
-   (opt.) Claude subagents      ← Opus / Sonnet / Haiku via Claude Code
-        ↓
-   results_claude_subagent/<model>.md
         ↓
 2. aggregate_findings.py parse  ← parses .md → findings.json (no LLM)
         ↓
@@ -112,26 +108,15 @@ as an example of localising the body while keeping English field markers
 (`Findings:`, `Location:`, …). Override with `--prompt PATH`. The template
 uses two placeholders: `{diff}` and `{context_block}`.
 
-### 2. (Optional) Run Claude subagents
-
-Dispatch Claude subagents (Opus / Sonnet / Haiku) from your chat and save
-their reviews to `results_claude_subagent/Claude_<Model>.md`, using the same
-heading format the parser expects (`1) [severity: ...] ...` or
-`### 1) [...]`).
-
-This step exists because Claude is not on OpenRouter for everyone, and
-running it through your existing Claude Code subscription is typically free.
-
-### 3. Parse findings
+### 2. Parse findings
 
 ```bash
 python aggregate_findings.py parse \
   --results-dir results \
-  --subagent-dir results_claude_subagent \
   -o findings.json
 ```
 
-### 4. Cluster findings (Claude in chat or `llm_judge.py cluster`)
+### 3. Cluster findings (Claude in chat or `llm_judge.py cluster`)
 
 Have Claude read `findings.json`, group findings by underlying problem, and
 write `clusters.json`:
@@ -158,7 +143,7 @@ python llm_judge.py cluster \
   --judge-model openai/gpt-5.5
 ```
 
-### 5. Render the worklist
+### 4. Render the worklist
 
 ```bash
 python aggregate_findings.py render \
@@ -167,7 +152,7 @@ python aggregate_findings.py render \
   -o worklist.md
 ```
 
-### 6. Adjudicate (Claude in chat or `llm_judge.py adjudicate`)
+### 5. Adjudicate (Claude in chat or `llm_judge.py adjudicate`)
 
 For each cluster, a reviewer reads the source at the cited location and
 assigns a verdict: `real | smell | nit | wrong`, with a short reason. The
@@ -209,7 +194,7 @@ The draft includes a "Needs human attention" preamble that flags
 low-confidence calls, severity-dissent clusters, and singletons (one model
 only) so you can prioritise what to look at.
 
-### 7. Compute metrics
+### 6. Compute metrics
 
 ```bash
 python compute_metrics.py \
@@ -224,7 +209,7 @@ Produces:
   inlined (useful for human verification, especially low-confidence calls)
 - `leaderboard.md` — per-model precision, recall, hallucination rate, $/real
 
-### 8. (Optional) Findings report skeleton
+### 7. (Optional) Findings report skeleton
 
 Pass `--report runs/<id>/findings_report.md` to `compute_metrics.py` to
 render a narrative-style report skeleton with auto-filled tables (real bugs,
@@ -242,7 +227,7 @@ python compute_metrics.py \
   --report      runs/<id>/findings_report.md
 ```
 
-Then a reviewer (you or a Claude subagent in chat) fills in the prose
+Then a reviewer (you or Claude in chat) fills in the prose
 blocks. This is the document that ties the run together for a paper or a
 team writeup.
 
@@ -255,13 +240,13 @@ optional `llm_judge.py` script does both via OpenRouter with a configurable
 judge model:
 
 ```bash
-# Step 4 alt
+# Step 3 alt
 python llm_judge.py cluster \
   --findings runs/<id>/findings.json \
   -o runs/<id>/clusters.json \
   --judge-model openai/gpt-5.5
 
-# Step 6 alt — produces verdicts.draft.md, NOT verdicts.md
+# Step 5 alt — produces verdicts.draft.md, NOT verdicts.md
 python llm_judge.py adjudicate \
   --clusters runs/<id>/clusters.json \
   --findings runs/<id>/findings.json \
@@ -344,7 +329,6 @@ ai-code-review-benchmark/
         ├── input.diff              ← the diff under review (for reproducibility)
         ├── results.json            ← OpenRouter raw output
         ├── results/                ← per-model .md (OpenRouter)
-        ├── results_claude_subagent/← per-model .md (Claude subagents)
         ├── findings.json           ← parsed findings
         ├── clusters.json           ← clusters (Claude in chat or llm_judge.py cluster)
         ├── worklist.md             ← worklist for human review
@@ -390,7 +374,6 @@ Everything below is created by the pipeline for one run.
 | `input.diff` | Unified diff text | user (`git diff > input.diff`) |
 | `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens}, elapsed_sec} } }` | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — `Findings:` block of numbered items: `N) [severity: blocker\|major\|minor\|nit] summary` followed by `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
-| `results_claude_subagent/<model>.md` | Markdown — same shape as above | Claude subagents (dispatched manually from chat) |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx into issues[]>]}] }` | Claude in chat — or `llm_judge.py cluster` |
 | `worklist.md` | Markdown — clusters with `[ ]` checkboxes (`real` / `smell` / `nit` / `wrong`) ready for human labelling | `aggregate_findings.py render` |

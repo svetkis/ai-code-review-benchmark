@@ -2,18 +2,18 @@
 """
 aggregate_findings.py — parse code-review findings and render the worklist.
 
-No LLM calls inside. Clustering is a separate step performed by a Claude
-subagent in the chat session.
+No LLM calls inside. Clustering is a separate step performed by Claude in
+the chat session, or via `llm_judge.py cluster`.
 
 Usage:
   # 1. Parse all .md → findings.json
   python aggregate_findings.py parse \
       --results-dir results \
-      --subagent-dir results_claude_subagent \
       --output findings.json
 
-  # 2. (separately) Dispatch a Claude subagent to produce clusters.json with
-  #    structure {"clusters": [{"id": N, "topic": "...",
+  # 2. (separately) Cluster the findings (Claude in chat or
+  #    `llm_judge.py cluster`); result is clusters.json with structure
+  #    {"clusters": [{"id": N, "topic": "...",
   #    "consensus_severity": "...", "members": [<int idx>]}]}
 
   # 3. Render the worklist
@@ -212,7 +212,7 @@ def render(clusters: list[dict], issues: list[dict], output: Path) -> None:
 
 def cmd_parse(args) -> None:
     print("=== Collecting findings ===")
-    issues = collect_issues(args.results_dir, args.subagent_dir)
+    issues = collect_issues(args.results_dir)
     models = sorted(set(i['model'] for i in issues))
     print(f"\nTotal: {len(issues)} findings from {len(models)} models")
     args.output.write_text(
@@ -221,9 +221,9 @@ def cmd_parse(args) -> None:
     )
     print(f"Saved: {args.output}")
     print(
-        "\nNext: dispatch a Claude subagent to cluster the findings; save the "
-        'result as clusters.json with structure {"clusters": [...]} and run '
-        "`aggregate_findings.py render`."
+        "\nNext: cluster the findings (Claude in chat or `llm_judge.py "
+        'cluster`); save as clusters.json with structure {"clusters": [...]} '
+        "and run `aggregate_findings.py render`."
     )
 
 
@@ -245,9 +245,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pp = sub.add_parser("parse", help="Parse .md reviews into findings.json")
-    pp.add_argument("--results-dir", type=Path, default=None)
-    pp.add_argument("--subagent-dir", type=Path,
-                    default=Path("results_claude_subagent"))
+    pp.add_argument("--results-dir", type=Path, default=Path("results"))
     pp.add_argument("--output", "-o", type=Path, default=Path("findings.json"))
     pp.set_defaults(func=cmd_parse)
 

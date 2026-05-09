@@ -27,13 +27,9 @@ precision / recall / hallucination rate.
 ```
 [diff + контекстные файлы]
         ↓
-1. code_review_benchmark.py     ← OpenRouter, N моделей параллельно
+1. code_review_benchmark.py     ← OpenRouter, N моделей последовательно
         ↓
    results.json + results/<model>.md
-        ↓
-   (опц.) Claude-субагенты      ← Opus / Sonnet / Haiku из Claude Code
-        ↓
-   results_claude_subagent/<model>.md
         ↓
 2. aggregate_findings.py parse  ← парсит .md → findings.json (без LLM)
         ↓
@@ -110,26 +106,15 @@ model id) или укажи другой файл флагом `--models-file PA
 (`Findings:`, `Location:` и т.д.). Перебить путь — флагом `--prompt PATH`.
 В шаблоне доступны два плейсхолдера: `{diff}` и `{context_block}`.
 
-### 2. (опц.) Прогон Claude-субагентов
-
-Запусти Claude-субагентов из чата (Opus / Sonnet / Haiku) и сохрани их
-ревью в `results_claude_subagent/Claude_<Model>.md` тем же форматом
-заголовков, который ожидает парсер (`1) [severity: ...] ...` или
-`### 1) [...]`).
-
-Этот шаг существует потому, что Claude доступен на OpenRouter не у всех, а
-прогон через подписку Claude Code обычно бесплатный.
-
-### 3. Парсинг находок
+### 2. Парсинг находок
 
 ```bash
 python aggregate_findings.py parse \
   --results-dir results \
-  --subagent-dir results_claude_subagent \
   -o findings.json
 ```
 
-### 4. Кластеризация (Claude в чате или `llm_judge.py cluster`)
+### 3. Кластеризация (Claude в чате или `llm_judge.py cluster`)
 
 Я (Claude) читаю `findings.json`, группирую находки по сути проблемы,
 сохраняю в `clusters.json`:
@@ -156,7 +141,7 @@ python llm_judge.py cluster \
   --judge-model openai/gpt-5.5
 ```
 
-### 5. Рендер worklist'а
+### 4. Рендер worklist'а
 
 ```bash
 python aggregate_findings.py render \
@@ -165,7 +150,7 @@ python aggregate_findings.py render \
   -o worklist.md
 ```
 
-### 6. Судейство (Claude в чате или `llm_judge.py adjudicate`)
+### 5. Судейство (Claude в чате или `llm_judge.py adjudicate`)
 
 Для КАЖДОГО кластера ревьюер читает исходный код в указанном месте и
 выносит вердикт `real | smell | nit | wrong` с обоснованием. Результат —
@@ -207,7 +192,7 @@ python llm_judge.py adjudicate \
 которым нужно особое внимание: low-confidence решения, severity dissent
 (модели резко расходятся в severity), синглетоны (одна модель пометила).
 
-### 7. Метрики
+### 6. Метрики
 
 ```bash
 python compute_metrics.py \
@@ -224,7 +209,7 @@ python compute_metrics.py \
 - `leaderboard.md` — таблица per-model метрик: precision, recall,
   hallucination rate, $/real
 
-### 8. (Опционально) Скелет нарративного отчёта
+### 7. (Опционально) Скелет нарративного отчёта
 
 Передай `--report runs/<id>/findings_report.md` в `compute_metrics.py` —
 скрипт срендерит нарративный отчёт со заполненными таблицами (real-баги,
@@ -242,7 +227,7 @@ python compute_metrics.py \
   --report      runs/<id>/findings_report.md
 ```
 
-Дальше ревьюер (ты или Claude-субагент в чате) дописывает прозу в
+Дальше ревьюер (ты или Claude в чате) дописывает прозу в
 `<!-- TODO -->` блоках. Это документ, который связывает прогон в единое
 повествование для статьи или внутренней рассылки команде.
 
@@ -254,13 +239,13 @@ python compute_metrics.py \
 есть опциональный `llm_judge.py`:
 
 ```bash
-# Шаг 4 alt
+# Шаг 3 alt
 python llm_judge.py cluster \
   --findings runs/<id>/findings.json \
   -o runs/<id>/clusters.json \
   --judge-model openai/gpt-5.5
 
-# Шаг 6 alt — выдаёт verdicts.draft.md, НЕ verdicts.md
+# Шаг 5 alt — выдаёт verdicts.draft.md, НЕ verdicts.md
 python llm_judge.py adjudicate \
   --clusters runs/<id>/clusters.json \
   --findings runs/<id>/findings.json \
@@ -342,7 +327,6 @@ ai-code-review-benchmark/
         ├── input.diff              ← сам diff (для воспроизводимости)
         ├── results.json            ← сырой output OpenRouter
         ├── results/                ← per-model .md (OpenRouter)
-        ├── results_claude_subagent/← per-model .md (Claude-субагенты)
         ├── findings.json           ← распарсенные находки
         ├── clusters.json           ← кластеры (Claude в чате или llm_judge.py cluster)
         ├── worklist.md             ← worklist для разметки
@@ -388,7 +372,6 @@ ai-code-review-benchmark/
 | `input.diff` | Unified diff (текст) | пользователь (`git diff > input.diff`) |
 | `results.json` | JSON — `{ meta: {diff_file, diff_size_chars, context_files, ...}, results: { <model>: {status, content, issues, issues_count, usage: {prompt_tokens, completion_tokens, total_tokens}, elapsed_sec} } }` | `code_review_benchmark.py` |
 | `results/<model>.md` | Markdown — блок `Findings:` с пронумерованными пунктами: `N) [severity: blocker\|major\|minor\|nit] summary` и подпунктами `- Location:`, `- Why it matters:`, `- Evidence:`, `- Recommendation:` | `code_review_benchmark.py` |
-| `results_claude_subagent/<model>.md` | Markdown — тот же формат | Claude-субагенты (запускаются из чата вручную) |
 | `findings.json` | JSON — `{ issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}] }` | `aggregate_findings.py parse` |
 | `clusters.json` | JSON — `{ clusters: [{id, topic, consensus_severity, members: [<int idx в issues[]>]}] }` | Claude в чате — или `llm_judge.py cluster` |
 | `worklist.md` | Markdown — кластеры с `[ ]`-чекбоксами (`real` / `smell` / `nit` / `wrong`), готовые к разметке | `aggregate_findings.py render` |
