@@ -355,8 +355,7 @@ ai-code-review-benchmark/
         ├── verdicts.md
         ├── worklist_judged.md
         ├── leaderboard.md
-        ├── findings_report.md
-        └── run.log
+        └── findings_report.md
 ```
 
 **ID прогона:** `runs/<short-id>/` — тикет (`PROJ-1234`), фича
@@ -399,7 +398,6 @@ ai-code-review-benchmark/
 | `leaderboard.md` | Precision, recall, hallucination rate, $/real | `compute_metrics.py` |
 | `findings_report.md` | Нарративный отчёт с таблицами и `<!-- TODO -->` под прозу | `compute_metrics.py --report` |
 | `cost_estimates.json` | **Только override.** Cost обычно берётся из `results.json`. Этот файл — для моделей вне OpenRouter или когда `usage.cost` = `null`. Ключи — нормализованные имена: `re.sub(r"[^\w\-]+", "_", name)` | ты (опционально) |
-| `run.log` | Stdout шага 1 | `code_review_benchmark.py` |
 
 ## Как участвовать
 

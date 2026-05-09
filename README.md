@@ -366,8 +366,7 @@ ai-code-review-benchmark/
         ├── verdicts.md
         ├── worklist_judged.md
         ├── leaderboard.md
-        ├── findings_report.md
-        └── run.log
+        └── findings_report.md
 ```
 
 **Run id:** `runs/<short-id>/` — a ticket (`PROJ-1234`), a feature
@@ -410,7 +409,6 @@ the public repo. Drop the line only if the run is fully public.
 | `leaderboard.md` | Precision, recall, hallucination rate, $/real | `compute_metrics.py` |
 | `findings_report.md` | Narrative report with tables and `<!-- TODO -->` blocks for prose | `compute_metrics.py --report` |
 | `cost_estimates.json` | **Override only.** Cost is normally read from `results.json`. This file is for models routed outside OpenRouter, or when `usage.cost` is `null`. Keys are sanitised names: `re.sub(r"[^\w\-]+", "_", name)` | you (optional) |
-| `run.log` | Stdout of step 1 | `code_review_benchmark.py` |
 
 ## How to contribute
 
