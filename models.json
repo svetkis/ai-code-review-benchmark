@@ -19,8 +19,7 @@
   "_reasoning_note":    "Reasoning model below — typically 10-30x base cost on this task. Strip leading `_` to enable.",
   "_GPT-5.5 Pro":       "openai/gpt-5.5-pro",
 
-  "_anthropic_note":    "Anthropic models below — only work if your OpenRouter account has Anthropic enabled. Strip leading `_` to enable.",
+  "Claude Sonnet 4.6":  "anthropic/claude-sonnet-4.6",
   "_Claude Opus 4.7":   "anthropic/claude-opus-4.7",
-  "_Claude Sonnet 4.6": "anthropic/claude-sonnet-4.6",
   "_Claude Haiku 4.5":  "anthropic/claude-haiku-4.5"
 }

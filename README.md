@@ -2,7 +2,7 @@
 
 [English](README.md) · [Русский](README.ru.md)
 
-> **One diff. N models. A leaderboard that actually matters for your codebase.**
+> **One diff. Several models. A leaderboard for your codebase.**
 
 Compare how different LLMs review *your* code. Take a real diff, run it
 through multiple models, adjudicate the findings, and get per-model
@@ -20,12 +20,8 @@ Author: Svetlana Meleshkina. Licensed under [MIT](LICENSE).
 
 Public benchmarks (SWE-bench, HumanEval, etc.) measure code generation.
 Review is a different task and breaks differently: the model invents bugs
-that aren't there, misses real ones, inflates severity, breaks the response
-format.
-
-This repo is a test harness that measures exactly that. On **your** diff,
-so you can pick a model for **your** codebase, not somebody else's
-leaderboard.
+that aren't there, misses real ones, inflates severity. This harness
+measures those failures on a diff you supply.
 
 Two steps in the pipeline require reasoning — clustering the findings and
 ruling on each cluster. You can do this **interactively with an agent**
@@ -36,15 +32,14 @@ The parsing and the summing-up are done by code.
 
 This bench measures a model in **bounded-context single-shot review** mode:
 a diff plus N context files in a single call through the OpenRouter API —
-no tool use, no follow-up questions, no access to the rest of the codebase.
-That's deliberate: every model gets the same input, results are comparable,
-runs are reproducible.
+no tool use, no follow-ups, no access to the rest of the codebase. Same
+input for every model, so results are comparable and runs reproducible.
 
-**What this bench does NOT measure:**
+**What this bench doesn't measure:**
 
 - **agentic review** — the model navigates the repo, reads callsites,
-  verifies hypotheses by running code. That's no longer a model, it's a
-  `model + tools` pipeline, and the leaderboard there may look different;
+  verifies hypotheses by running code. That's a `model + tools` pipeline,
+  and the leaderboard there can look different;
 - **harness effect** — Copilot+Opus, Claude Code+Opus and a bare API+Opus
   call give different results on the same prompt;
 - **reasoning outside the context block** — if a bug is only provable
@@ -148,7 +143,7 @@ as an external MCP server. Serena is not on PyPI yet; install it via `uvx`:
 uvx --from git+https://github.com/oraios/serena serena --version
 ```
 
-The bounded-context track (`code_review_benchmark.py`) does **not** need Serena.
+The bounded-context track (`code_review_benchmark.py`) does not need Serena.
 
 ## Quick start
 
@@ -320,7 +315,7 @@ or an internal team writeup.
 
 `llm_judge.py` runs clustering and adjudication through OpenRouter. Use it
 when you want **reproducibility** (same prompt → same result), **multi-judge**
-comparisons (run GPT-5.5, Claude Sonnet and DeepSeek and compare agreement),
+comparisons (run GPT-5.5, Kimi K2 and DeepSeek and compare agreement),
 or when you prefer automation over chat.
 
 ```bash
@@ -426,25 +421,7 @@ one run live in one folder.
 `runs/` is in `.gitignore` so runs against private code don't leak into
 the public repo. Drop the line only if the run is fully public.
 
-## Files
-
-### Scripts
-
-| File | What it does |
-|---|---|
-| `code_review_benchmark.py` | Runner: bounded-context single-shot via OpenRouter (step 1) |
-| `code_review_benchmark_agent.py` | Runner: agentic track via OpenRouter + Serena MCP (requires Serena) |
-| `aggregate_findings.py` | Parses findings + builds the worklist; doesn't call any LLM |
-| `compute_metrics.py` | Metrics + results table + findings_report; doesn't call any LLM |
-| `llm_judge.py` | Automated clustering and adjudication via OpenRouter |
-| `models.json` | `{display_name: openrouter_model_id}`; keys starting with `_` are comments |
-| `prompts/review.en.txt` | Step 1 prompt; placeholders `{diff}`, `{context_block}` |
-| `prompts/review.ru.txt` | Russian body + English markers |
-| `prompts/cluster.en.txt` | Step 3 rubric; placeholder `{findings_block}` |
-| `prompts/judge.en.txt` | Step 5 rubric; placeholders `{cluster_id}`, `{cluster_topic}`, `{cluster_severity}`, `{cluster_findings}`, `{source_excerpt}`, `{source_status}` |
-| `templates/findings_report.template.md` | Skeleton with `{TOKEN}` placeholders and `<!-- TODO -->` blocks |
-
-### Run artefacts (`runs/<run-id>/`)
+## Run artefacts (`runs/<run-id>/`)
 
 | File | What it is | Producer |
 |---|---|---|
