@@ -59,8 +59,8 @@ DEFAULT_SERENA_CMD = (
     "uvx --from git+https://github.com/oraios/serena "
     "serena start-mcp-server --transport stdio"
 )
-DEFAULT_MAX_STEPS = 20
-DEFAULT_MAX_COST_PER_MODEL = 1.0
+DEFAULT_MAX_STEPS = 50
+DEFAULT_MAX_COST_PER_MODEL = 1.5
 DEFAULT_PROMPT_PATH = Path("prompts/review.agentic.en.txt")
 DEFAULT_MODELS_FILE = Path("models.agentic.json")
 
