@@ -27,8 +27,9 @@
 чтобы выбрать модель под **твою** кодовую базу, а не под чужую таблицу рекордов.
 
 Два шага в пайплайне намеренно оставлены «ручными» — кластеризация находок
-и вердикт по каждому кластеру. Парсинг и сводку делает код. Суждения —
-человек (с помощью Claude в чате).
+и вердикт по каждому кластеру. Парсинг и сводку делает код. Суждения можно
+вынести интерактивно через агента в чате (Claude, Kimi, Cursor и др.)
+или автоматизировать через LLM judge (OpenRouter).
 
 ## Что именно меряется (и что нет)
 
@@ -49,8 +50,13 @@ tool use, без follow-up вопросов, без доступа к остал
   через файл, который ты не передал, его никто не поймает.
 
 **Когда применимо:** выбор модели под CI-ревью, PR-комментирующего бота,
-IDE-плагин с ограниченным контекстом. Для интерактивного review с
-tool use нужен другой стенд — тот же diff, но через Serena / MCP-обёртку.
+IDE-плагин с ограниченным контекстом.
+
+**Agentic track:** для интерактивного review с tool use (модель ходит по репо,
+читает callsite'ы) есть отдельный стенд — `code_review_benchmark_agent.py`.
+Он прогоняет тот же diff через цикл OpenRouter + Serena MCP и выдаёт
+результат, совместимый с тем же пайплайном метрик.
+См. `docs/plans/2026-05-09-agentic-track.md`. Требует Serena (см. Установка).
 
 **Чувствительность.** Результаты зависят от качества кода в diff'е
 (разрыв между моделями на «грязном» коде — не то же, что на чистом)
@@ -70,7 +76,7 @@ flowchart TD
     A1 --> S2[2. aggregate_findings.py parse]
     S2 --> A2[findings.json]
 
-    A2 --> S3[3. Claude в чате — кластеризация]
+    A2 --> S3[3. Кластеризация — Агент или llm_judge.py]
     A2 -. alt .-> S3alt[llm_judge.py cluster]
     S3 --> A3[clusters.json]
     S3alt -.-> A3
@@ -78,7 +84,7 @@ flowchart TD
     A3 --> S4[4. aggregate_findings.py render]
     S4 --> A4[worklist.md]
 
-    A4 --> S5[5. Claude в чате — судейство]
+    A4 --> S5[5. Судейство — Агент или llm_judge.py]
     A4 -. alt .-> S5alt[llm_judge.py adjudicate]
     S5alt -.-> Draft[verdicts.draft.md]
     Draft -. вычитка .-> Human
@@ -100,19 +106,21 @@ flowchart TD
     class Input,A1,A2,A3,A4,Draft,Out1,Out2,Out3 artifact
 ```
 
-Легенда: жёлтый — LLM-вызовы (OpenRouter или Claude в чате), синий —
-Python без LLM, розовый — человеческий чекпоинт. Пунктир — альтернативный
-путь через `llm_judge.py` для тех, у кого нет Claude Code.
+Легенда: жёлтый — LLM-вызовы (OpenRouter или агент), синий —
+Python без LLM, розовый — человеческий чекпоинт. Пунктир — автоматизированный
+путь через `llm_judge.py`.
 
 **Принцип:** Python-скрипты (парсинг, рендеринг, метрики) LLM не зовут.
-Всё, что требует рассуждения (кластеризация, судейство), делает Claude
-в чате — обычно бесплатно по подписке. OpenRouter тратится только на
-шаге 1, где гоняются сторонние модели.
+Для шагов, требующих рассуждения (кластеризация, судейство), есть два пути:
 
-Нет Claude Code? Есть опциональный `llm_judge.py` — он делает кластеризацию
-и судейство через OpenRouter. На выходе **черновик** (`verdicts.draft.md`),
-который ты всё равно вычитываешь перед метриками. Подробности —
-[ниже](#автоматические-черновики-через-openrouter-опционально).
+- **Агент** — интерактивно, обычно бесплатно в режиме чата (Claude, Kimi,
+  Cursor и др.).
+- **LLM judge** (`llm_judge.py`) — автоматизированно через OpenRouter,
+  воспроизводимо, работает с любой моделью, подписка не нужна.
+
+Оба пути дают одинаковые артефакты (`clusters.json`, `verdicts.md`).
+Автоматизированный судья выдаёт **черновик** (`verdicts.draft.md`),
+который ты вычитываешь перед метриками. Подробности ниже.
 
 ## Установка
 
@@ -129,6 +137,17 @@ $env:OPENROUTER_API_KEY = "..."   # PowerShell
 export OPENROUTER_API_KEY=...     # bash
 ```
 
+**Только для agentic track** (опционально): агентский стенд
+(`code_review_benchmark_agent.py`) требует [Serena](https://github.com/oraios/serena)
+как внешний MCP-сервер. Serena пока не в PyPI; ставится через `uvx`:
+
+```bash
+# Проверь, что Serena доступна
+uvx --from git+https://github.com/oraios/serena serena --version
+```
+
+Bounded-context стенд (`code_review_benchmark.py`) **не нуждается** в Serena.
+
 ## Быстрый старт
 
 ```bash
@@ -138,19 +157,19 @@ python code_review_benchmark.py my.diff -c file.cs -o runs/demo/results.json
 # 2. Парсинг находок
 python aggregate_findings.py parse --results-dir runs/demo/results -o runs/demo/findings.json
 
-# 3. Кластеризация (Claude в чате или llm_judge.py cluster)
+# 3. Кластеризация (Агент или llm_judge.py cluster)
 # 4. Сборка worklist
 python aggregate_findings.py render --findings runs/demo/findings.json \
   --clusters runs/demo/clusters.json -o runs/demo/worklist.md
 
-# 5. Судейство (Claude в чате или llm_judge.py adjudicate)
+# 5. Судейство (Агент или llm_judge.py adjudicate)
 # 6. Подсчёт метрик
 python compute_metrics.py --verdicts runs/demo/verdicts.md \
   --findings runs/demo/findings.json --clusters runs/demo/clusters.json \
   --results runs/demo/results.json --leaderboard runs/demo/leaderboard.md
 ```
 
-Шаги 3 и 5 требуют человеческого суждения — подробности ниже.
+Шаги 3 и 5 требуют рассуждения — подробности ниже.
 
 ## Как пользоваться
 
@@ -184,8 +203,7 @@ python aggregate_findings.py parse \
 
 ### 3. Кластеризация
 
-Claude читает `findings.json` и группирует находки по сути проблемы.
-Результат — `clusters.json`:
+Сгруппируй находки по сути проблемы. Результат — `clusters.json`:
 
 ```json
 {
@@ -195,11 +213,12 @@ Claude читает `findings.json` и группирует находки по 
 }
 ```
 
-**В Claude Code:** открой папку прогона и скажи:
+**Вариант А — Агент (интерактивно, обычно бесплатно в чате):**
+Открой папку прогона в агенте и попроси:
 > Прочитай `findings.json`. Сгруппируй находки по сути проблемы (рубрика —
 > `prompts/cluster.en.txt`). Запиши результат в `clusters.json`.
 
-**Или автоматически:**
+**Вариант Б — LLM judge (автоматизированно, через OpenRouter):**
 
 ```bash
 python llm_judge.py cluster \
@@ -235,12 +254,12 @@ python aggregate_findings.py render \
 **Финальный вердикт — за человеком.** Оба пути ниже дают черновик.
 Вычитай и поправь, прежде чем считать метрики.
 
-**В Claude Code:**
+**Вариант А — Агент (интерактивно, обычно бесплатно в чате):**
 > Для каждого кластера в `worklist.md` прочитай исходный код по `Location:`
 > и вынеси вердикт по рубрике из `prompts/judge.en.txt`. Запиши в `verdicts.md`.
 
-**Или автоматически** (на выходе `verdicts.draft.md` — переименуешь в
-`verdicts.md` после ревью):
+**Вариант Б — LLM judge (автоматизированно, через OpenRouter):**
+На выходе `verdicts.draft.md` — переименуешь в `verdicts.md` после ревью.
 
 ```bash
 python llm_judge.py adjudicate \
@@ -291,11 +310,12 @@ python compute_metrics.py \
 Дальше дописываешь прозу в `<!-- TODO -->` блоках — для статьи или
 внутренней рассылки команде.
 
-## Автоматические черновики через OpenRouter (опционально)
+## LLM judge (автоматизированный путь)
 
-По умолчанию кластеризация и судейство делаются в Claude в чате. Если
-Claude Code нет, или хочется прогнать несколько судей для воспроизводимости —
-есть `llm_judge.py`:
+`llm_judge.py` делает кластеризацию и судейство через OpenRouter. Используй,
+когда нужна **воспроизводимость** (один промпт → один результат), **мульти-суд**
+(прогони GPT-5.5, Claude Sonnet и DeepSeek и сравни согласие) или когда
+нужна автоматизация вместо чата.
 
 ```bash
 # Кластеризация
@@ -362,10 +382,11 @@ ai-code-review-benchmark/
 ├── README.ru.md
 ├── LICENSE
 ├── requirements.txt
-├── code_review_benchmark.py        ← раннер: гоняет модели через OpenRouter
+├── code_review_benchmark.py        ← раннер: bounded-context single-shot через OpenRouter
+├── code_review_benchmark_agent.py  ← раннер: agentic track через OpenRouter + Serena MCP
 ├── aggregate_findings.py           ← парсинг находок + сборка worklist (без LLM)
 ├── compute_metrics.py              ← метрики + таблица результатов + отчёт (без LLM)
-├── llm_judge.py                    ← опционально: черновики кластеризации/судейства
+├── llm_judge.py                    ← автоматизированная кластеризация и судейство через OpenRouter
 ├── models.json                     ← список моделей по умолчанию
 ├── prompts/
 │   ├── review.en.txt               ← промт ревьюера (шаг 1)
@@ -402,10 +423,11 @@ ai-code-review-benchmark/
 
 | Файл | Что делает |
 |---|---|
-| `code_review_benchmark.py` | Раннер: гоняет модели через OpenRouter (шаг 1) |
+| `code_review_benchmark.py` | Раннер: bounded-context single-shot через OpenRouter (шаг 1) |
+| `code_review_benchmark_agent.py` | Раннер: agentic track через OpenRouter + Serena MCP (требует Serena) |
 | `aggregate_findings.py` | Парсинг находок + сборка worklist'а, LLM не зовёт |
 | `compute_metrics.py` | Метрики + таблица результатов + findings_report, LLM не зовёт |
-| `llm_judge.py` | Опционально: черновики кластеризации и судейства через OpenRouter |
+| `llm_judge.py` | Автоматизированная кластеризация и судейство через OpenRouter |
 | `models.json` | `{display_name: openrouter_model_id}`, ключи на `_` — комментарии |
 | `prompts/review.en.txt` | Промт шага 1; плейсхолдеры `{diff}`, `{context_block}` |
 | `prompts/review.ru.txt` | Русское тело + английские маркеры |
@@ -421,10 +443,10 @@ ai-code-review-benchmark/
 | `results.json` | Мета + сырые ответы моделей. Per-model `cost` и `reasoning_tokens` из OpenRouter (могут быть `null`). | `code_review_benchmark.py` |
 | `results/<model>.md` | Ревью одной модели: `Findings:` с пронумерованными пунктами и подпунктами `Location:`, `Why it matters:`, `Evidence:`, `Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | `{issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}]}` | `aggregate_findings.py parse` |
-| `clusters.json` | `{clusters: [{id, topic, consensus_severity, members: [int]}]}` | Claude в чате / `llm_judge.py cluster` |
+| `clusters.json` | `{clusters: [{id, topic, consensus_severity, members: [int]}]}` | Агент или `llm_judge.py cluster` |
 | `worklist.md` | Кластеры с `[ ]`-чекбоксами, готовые к разметке | `aggregate_findings.py render` |
 | `verdicts.draft.md` | Черновик вердиктов + преамбула «Needs human attention». После ревью → `verdicts.md` | `llm_judge.py adjudicate` |
-| `verdicts.md` | Вердикты по кластерам (`## Cluster N`, `Verdict:`, `Confidence:`, `Reason:`) | Claude в чате / ручное ревью черновика |
+| `verdicts.md` | Вердикты по кластерам (`## Cluster N`, `Verdict:`, `Confidence:`, `Reason:`) | Агент или ручное ревью черновика |
 | `worklist_judged.md` | Worklist с `[x]` и заметками судьи | `compute_metrics.py` |
 | `leaderboard.md` | Precision, recall, hallucination rate, $/real | `compute_metrics.py` |
 | `findings_report.md` | Нарративный отчёт с таблицами и `<!-- TODO -->` под прозу | `compute_metrics.py --report` |

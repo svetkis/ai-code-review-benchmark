@@ -27,10 +27,10 @@ This repo is a test harness that measures exactly that. On **your** diff,
 so you can pick a model for **your** codebase, not somebody else's
 leaderboard.
 
-Two steps in the pipeline are deliberately kept manual — clustering the
-findings and ruling on each cluster. The parsing and the summing-up are
-done by code. The judgement calls are made by a human (with Claude in chat
-helping).
+Two steps in the pipeline require reasoning — clustering the findings and
+ruling on each cluster. You can do this **interactively with an agent**
+(e.g. Kimi, Claude, Cursor) or **automate it with the LLM judge** via OpenRouter.
+The parsing and the summing-up are done by code.
 
 ## Scope: what this measures (and what it doesn't)
 
@@ -51,9 +51,14 @@ runs are reproducible.
   via a file you didn't pass in, nobody will catch it.
 
 **When this bench applies:** picking a model for CI review, a PR-commenting
-bot, or an IDE plugin with bounded context. For picking a model for
-interactive review with tool use, you need a different harness — the
-same diff, but run through Serena / an MCP wrapper.
+bot, or an IDE plugin with bounded context.
+
+**Agentic track:** for interactive review with tool use (model navigates the
+repo, reads callsites), there is a separate harness —
+`code_review_benchmark_agent.py`. It runs the same diff through an
+OpenRouter + Serena MCP loop and produces output compatible with the same
+metrics pipeline. See `docs/plans/2026-05-09-agentic-track.md` for details.
+Requires Serena (see Install).
 
 **Sensitivity.** Results depend on the quality of the code in the diff
 (the gap between models on messy code is not the same as on clean code)
@@ -73,7 +78,7 @@ flowchart TD
     A1 --> S2[2. aggregate_findings.py parse]
     S2 --> A2[findings.json]
 
-    A2 --> S3[3. Claude in chat — clustering]
+    A2 --> S3[3. Cluster — Your agent or llm_judge.py]
     A2 -. alt .-> S3alt[llm_judge.py cluster]
     S3 --> A3[clusters.json]
     S3alt -.-> A3
@@ -81,7 +86,7 @@ flowchart TD
     A3 --> S4[4. aggregate_findings.py render]
     S4 --> A4[worklist.md]
 
-    A4 --> S5[5. Claude in chat — adjudication]
+    A4 --> S5[5. Adjudicate — Your agent or llm_judge.py]
     A4 -. alt .-> S5alt[llm_judge.py adjudicate]
     S5alt -.-> Draft[verdicts.draft.md]
     Draft -. human review .-> Human
@@ -103,19 +108,21 @@ flowchart TD
     class Input,A1,A2,A3,A4,Draft,Out1,Out2,Out3 artifact
 ```
 
-Legend: yellow — LLM calls (OpenRouter or Claude in chat), blue — Python
-without LLM, pink — human checkpoint. Dashed = alternative path through
-`llm_judge.py` for those without Claude Code.
+Legend: yellow — LLM calls (OpenRouter or your agent), blue — Python
+without LLM, pink — human checkpoint. Dashed = automated path via
+`llm_judge.py`.
 
 **Principle:** Python scripts (parsing, rendering, metrics) don't call any
-LLM. Everything that takes reasoning (clustering, adjudication) goes to
-Claude in chat — usually free under your subscription. OpenRouter spend is
-confined to step 1, where third-party models are exercised.
+LLM. For the reasoning steps (clustering, adjudication) you have two options:
 
-No Claude Code? There's an optional `llm_judge.py` — it runs clustering
-and adjudication through OpenRouter. Output is a **draft**
-(`verdicts.draft.md`) that you still read through before the metrics step.
-Details [below](#automated-drafts-via-openrouter-optional).
+- **Your agent** — interactive, usually free in chat mode (Claude, Kimi,
+  Cursor, etc.).
+- **LLM judge** (`llm_judge.py`) — automated via OpenRouter, reproducible,
+  works with any model, no subscription needed.
+
+Both paths produce the same artefacts (`clusters.json`, `verdicts.md`).
+The automated judge emits a **draft** (`verdicts.draft.md`) that you review
+before the metrics step. See both options below.
 
 ## Install
 
@@ -132,6 +139,17 @@ $env:OPENROUTER_API_KEY = "..."   # PowerShell
 export OPENROUTER_API_KEY=...     # bash
 ```
 
+**Agentic track only** (optional): the agentic harness
+(`code_review_benchmark_agent.py`) requires [Serena](https://github.com/oraios/serena)
+as an external MCP server. Serena is not on PyPI yet; install it via `uvx`:
+
+```bash
+# Verify Serena is available
+uvx --from git+https://github.com/oraios/serena serena --version
+```
+
+The bounded-context track (`code_review_benchmark.py`) does **not** need Serena.
+
 ## Quick start
 
 ```bash
@@ -141,19 +159,19 @@ python code_review_benchmark.py my.diff -c file.cs -o runs/demo/results.json
 # 2. Parse findings
 python aggregate_findings.py parse --results-dir runs/demo/results -o runs/demo/findings.json
 
-# 3. Cluster (Claude in chat, or use llm_judge.py cluster)
+# 3. Cluster (Your agent or llm_judge.py cluster)
 # 4. Render worklist
 python aggregate_findings.py render --findings runs/demo/findings.json \
   --clusters runs/demo/clusters.json -o runs/demo/worklist.md
 
-# 5. Adjudicate (Claude in chat, or use llm_judge.py adjudicate)
+# 5. Adjudicate (Your agent or llm_judge.py adjudicate)
 # 6. Compute metrics
 python compute_metrics.py --verdicts runs/demo/verdicts.md \
   --findings runs/demo/findings.json --clusters runs/demo/clusters.json \
   --results runs/demo/results.json --leaderboard runs/demo/leaderboard.md
 ```
 
-Steps 3 and 5 require human judgement — see the detailed guide below.
+Steps 3 and 5 require reasoning — see the detailed guide below.
 
 ## How to use
 
@@ -189,8 +207,7 @@ python aggregate_findings.py parse \
 
 ### 3. Clustering
 
-Claude reads `findings.json` and groups findings by the underlying problem.
-Result — `clusters.json`:
+Group findings by the underlying problem. Result — `clusters.json`:
 
 ```json
 {
@@ -200,11 +217,12 @@ Result — `clusters.json`:
 }
 ```
 
-**In Claude Code:** open the run folder and say:
+**Option A — Your agent (interactive, usually free in chat mode):**
+Open the run folder in your agent and ask:
 > Read `findings.json`. Group the findings by the same underlying problem
 > (rubric — `prompts/cluster.en.txt`). Write the result to `clusters.json`.
 
-**Or automatically:**
+**Option B — LLM judge (automated, via OpenRouter):**
 
 ```bash
 python llm_judge.py cluster \
@@ -240,13 +258,13 @@ verdict: `real | smell | nit | wrong`. Result — `verdicts.md`:
 **The human owns the final verdict.** Both paths below produce a draft.
 Read it through and fix what needs fixing before computing metrics.
 
-**In Claude Code:**
+**Option A — Your agent (interactive, usually free in chat mode):**
 > For each cluster in `worklist.md` read the source at `Location:` and
 > assign a verdict using the rubric in `prompts/judge.en.txt`. Write to
 > `verdicts.md`.
 
-**Or automatically** (output is `verdicts.draft.md` — rename to
-`verdicts.md` after review):
+**Option B — LLM judge (automated, via OpenRouter):**
+Produces `verdicts.draft.md` — rename to `verdicts.md` after review.
 
 ```bash
 python llm_judge.py adjudicate \
@@ -298,11 +316,12 @@ python compute_metrics.py \
 Then you fill in the prose in the `<!-- TODO -->` blocks — for an article
 or an internal team writeup.
 
-## Automated drafts via OpenRouter (optional)
+## LLM judge (automated path)
 
-By default, clustering and adjudication run in Claude chat. If you don't
-have Claude Code, or you want to run several judges for reproducibility —
-there's `llm_judge.py`:
+`llm_judge.py` runs clustering and adjudication through OpenRouter. Use it
+when you want **reproducibility** (same prompt → same result), **multi-judge**
+comparisons (run GPT-5.5, Claude Sonnet and DeepSeek and compare agreement),
+or when you prefer automation over chat.
 
 ```bash
 # Clustering
@@ -372,10 +391,11 @@ ai-code-review-benchmark/
 ├── README.ru.md
 ├── LICENSE
 ├── requirements.txt
-├── code_review_benchmark.py        ← runner: runs models through OpenRouter
+├── code_review_benchmark.py        ← runner: bounded-context single-shot via OpenRouter
+├── code_review_benchmark_agent.py  ← runner: agentic track via OpenRouter + Serena MCP
 ├── aggregate_findings.py           ← parses findings + builds worklist (no LLM)
 ├── compute_metrics.py              ← metrics + results table + report (no LLM)
-├── llm_judge.py                    ← optional: clustering/adjudication drafts
+├── llm_judge.py                    ← automated clustering and adjudication via OpenRouter
 ├── models.json                     ← default model list
 ├── prompts/
 │   ├── review.en.txt               ← reviewer prompt (step 1)
@@ -412,10 +432,11 @@ the public repo. Drop the line only if the run is fully public.
 
 | File | What it does |
 |---|---|
-| `code_review_benchmark.py` | Runner: runs models through OpenRouter (step 1) |
+| `code_review_benchmark.py` | Runner: bounded-context single-shot via OpenRouter (step 1) |
+| `code_review_benchmark_agent.py` | Runner: agentic track via OpenRouter + Serena MCP (requires Serena) |
 | `aggregate_findings.py` | Parses findings + builds the worklist; doesn't call any LLM |
 | `compute_metrics.py` | Metrics + results table + findings_report; doesn't call any LLM |
-| `llm_judge.py` | Optional: drafts clustering and adjudication via OpenRouter |
+| `llm_judge.py` | Automated clustering and adjudication via OpenRouter |
 | `models.json` | `{display_name: openrouter_model_id}`; keys starting with `_` are comments |
 | `prompts/review.en.txt` | Step 1 prompt; placeholders `{diff}`, `{context_block}` |
 | `prompts/review.ru.txt` | Russian body + English markers |
@@ -431,10 +452,10 @@ the public repo. Drop the line only if the run is fully public.
 | `results.json` | Metadata + raw model responses. Per-model `cost` and `reasoning_tokens` from OpenRouter (may be `null`). | `code_review_benchmark.py` |
 | `results/<model>.md` | One model's review: `Findings:` with numbered items and sub-items `Location:`, `Why it matters:`, `Evidence:`, `Recommendation:` | `code_review_benchmark.py` |
 | `findings.json` | `{issues: [{model, severity, summary, location, why_it_matters, evidence, recommendation}]}` | `aggregate_findings.py parse` |
-| `clusters.json` | `{clusters: [{id, topic, consensus_severity, members: [int]}]}` | Claude in chat / `llm_judge.py cluster` |
+| `clusters.json` | `{clusters: [{id, topic, consensus_severity, members: [int]}]}` | Your agent or `llm_judge.py cluster` |
 | `worklist.md` | Clusters with `[ ]` checkboxes, ready for labelling | `aggregate_findings.py render` |
 | `verdicts.draft.md` | Draft verdicts + "Needs human attention" preamble. After review → `verdicts.md` | `llm_judge.py adjudicate` |
-| `verdicts.md` | Per-cluster verdicts (`## Cluster N`, `Verdict:`, `Confidence:`, `Reason:`) | Claude in chat / human review of the draft |
+| `verdicts.md` | Per-cluster verdicts (`## Cluster N`, `Verdict:`, `Confidence:`, `Reason:`) | Your agent or human review of the draft |
 | `worklist_judged.md` | Worklist with `[x]` and judge notes | `compute_metrics.py` |
 | `leaderboard.md` | Precision, recall, hallucination rate, $/real | `compute_metrics.py` |
 | `findings_report.md` | Narrative report with tables and `<!-- TODO -->` blocks for prose | `compute_metrics.py --report` |
