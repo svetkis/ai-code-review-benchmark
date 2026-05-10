@@ -66,7 +66,7 @@ def call_openrouter(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": os.environ.get("OPENROUTER_REFERER", DEFAULT_REFERER),
-        "X-Title": "Code Review Benchmark — LLM Judge",
+        "X-Title": "Code Review Benchmark - LLM Judge",
     }
     payload = {
         "model": model_id,

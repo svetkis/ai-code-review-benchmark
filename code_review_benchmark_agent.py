@@ -298,7 +298,7 @@ def _post_openrouter(
         "tools": openai_tools,
         "tool_choice": "auto",
         "parallel_tool_calls": False,
-        "max_tokens": 16000,
+        "max_tokens": 64000,
         "temperature": 0.0,
         "usage": {"include": True},
     }
