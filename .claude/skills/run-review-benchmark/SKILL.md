@@ -1,6 +1,6 @@
 ---
 name: run-review-benchmark
-description: Run the LLM code-review benchmark pipeline end-to-end — fan a diff out to multiple models via OpenRouter, parse findings, build the worklist, compute the leaderboard. Use when the user says "benchmark this PR/branch/diff", "compare models on this code", asks how to use code_review_benchmark.py / aggregate_findings.py / compute_metrics.py, or wants to set up a new run-id under runs/.
+description: Run the LLM code-review benchmark pipeline end-to-end — bounded-context single-shot or agentic track with tool use. Fan a diff out to multiple models via OpenRouter, parse findings, build the worklist, compute the leaderboard. Use when the user says "benchmark this PR/branch/diff", "compare models on this code", "run the agentic benchmark", asks how to use code_review_benchmark.py / code_review_benchmark_agent.py / aggregate_findings.py / compute_metrics.py, or wants to set up a new run-id under runs/.
 ---
 
 # run-review-benchmark
@@ -10,8 +10,9 @@ description: Run the LLM code-review benchmark pipeline end-to-end — fan a dif
 Use this skill when the user wants to **measure** how several LLMs perform
 on a concrete diff: trigger phrases include "benchmark this PR/branch/diff",
 "compare models on this code", "run the benchmark on …", or any request to
-operate `code_review_benchmark.py`, `aggregate_findings.py`, or
-`compute_metrics.py` and produce a `leaderboard.md` under `runs/<id>/`.
+operate `code_review_benchmark.py`, `code_review_benchmark_agent.py`,
+`aggregate_findings.py`, or `compute_metrics.py` and produce a `leaderboard.md`
+under `runs/<id>/`.
 
 Do **not** use this skill for:
 
@@ -56,6 +57,9 @@ missing, halt with
 If present, count the entries (keys not starting with `_`) and remember
 the number for the confirm-block.
 
+If present, count the entries (keys not starting with `_`) and remember
+the number for the confirm-block.
+
 ## Decide run-id
 
 Pick the `runs/<id>/` slot **before** acquiring the diff so artefacts land
@@ -90,13 +94,16 @@ missing artefact in this order and resume from the corresponding step:
 
 | Missing | Resume from |
 |---|---|
-| `input.diff` | Acquire input.diff (then re-print confirm-block before step 1) |
-| `results.json` | Step 1 (re-print confirm-block first — paid step) |
+| `input.diff` | Acquire input.diff (then re-print confirm-block before step 1 / 1A) |
+| `results.json` | Step 1 or 1A (re-print confirm-block first — paid step) |
 | `findings.json` | Step 2 |
 | `clusters.json` | Step 3 — Pause: clustering |
 | `worklist.md` | Step 4 |
 | `verdicts.md` | Step 5 — Pause: adjudication |
 | `worklist_judged.md` or `leaderboard.md` | Step 6 |
+
+For agentic runs, also check `run.agentic.log` and `.trace.jsonl` files;
+their absence does not block resume, but note it in the summary.
 
 If the missing step is step 1 (paid), always re-print the confirm-block
 before resuming, even on `continue`. The user's prior `go` does not carry
@@ -156,10 +163,67 @@ bash: `wc -c -l < runs/<id>/input.diff`. Then:
   > large>`. Is this the diff you meant to benchmark?"
   Wait for an explicit yes before continuing. Do not halt.
 
+**Context files note:** for the **bounded-context** track, the user must
+supply `-c` context files (post-change file contents). For the **agentic**
+track, `-c` is **not used** — the model reads the repo via Serena tools.
+Do not ask for `-c` files if agentic was chosen.
+
+## Choose track
+
+Before the confirm block, decide which harness to run. **Do not guess.**
+
+**If the user explicitly said "agentic", "with tool use", "agentic benchmark",
+"run through Serena", or similar — use agentic.**
+
+**If the user explicitly said "bounded", "single-shot", "no tools", or
+just "benchmark this diff" without mentioning tools — use bounded-context.**
+
+**If unclear — ask explicitly:**
+> "There are two tracks available:\n"
+> "- **Bounded-context** (default): diff + context files, single-shot, no tool use.\n"
+> "- **Agentic**: model navigates the repo via Serena MCP (read-only tools).\n"
+> "Requires Serena + `.serena/project.yml` in the target repo.\n"
+> "Which track do you want?"
+
+Wait for an explicit answer. Do not default to bounded-context silently.
+
+**Bounded-context** — `code_review_benchmark.py`. Single-shot, no tool use,
+diff + `-c` context files only.
+
+**Agentic** — `code_review_benchmark_agent.py`. Model navigates the repo
+via Serena MCP (read-only tools: `get_symbols_overview`, `find_symbol`,
+`find_referencing_symbols`, `read_file`, `list_dir`). Requires:
+- Serena installed (`uvx`)
+- `--repo-path` pointing to a git repo with `.serena/project.yml`
+- `models.agentic.json` instead of `models.json` (or override via `--models-file`)
+
+If agentic: ask the user for `--repo-path` if they didn't provide one.
+The diff path is still required (the harness compares the diff against
+the repo state at `source_commit`).
+
+**Track-specific validation (run after the user picks a track):**
+
+- **Bounded-context:** if the user supplied `-c` files, verify each path
+  exists. If any missing, halt and ask to re-supply. If no `-c` files
+  given, warn: "No context files provided. The models will see only the
+  diff, which may reduce accuracy. Continue anyway?"
+
+- **Agentic:**
+  - `code_review_benchmark_agent.py` exists in cwd. If not, halt:
+    > "Agentic harness not found. Make sure you are in the code-review-benchmark repo root."
+  - Serena is available: run `uvx --from git+https://github.com/oraios/serena serena --version`.
+    If it fails, halt:
+    > "Serena is required for the agentic track but is not installed. Install it with:\n"
+    > "`uvx --from git+https://github.com/oraios/serena serena --version`\n"
+    > "See README.md Install section for details."
+  - The target repo (`--repo-path`) contains `.serena/project.yml`. If not, halt:
+    > "`.serena/project.yml` not found in the target repo. Create it first; see README.md or copy the template from `.serena/project.yml` in this repo."
+
 ## Confirm before paid step
 
-Step 1 is the **only paid** step (OpenRouter API spend, scaled by
-`N models × diff size`). Always pause here.
+Step 1 (bounded) or Step 1A (agentic) is the **only paid** step (OpenRouter
+API spend, scaled by `N models × diff size` × `tool calls` for agentic).
+Always pause here.
 
 **Format:** print a confirm-block in the form shown in
 [`examples/preflight.md`](examples/preflight.md), with every value
@@ -183,9 +247,10 @@ Loop until `go`. If the user says `cancel` / `stop` / `abort`, halt and
 **leave** the run folder, `input.diff`, and any other prepared artefacts
 on disk — they make resuming a one-line affair next time.
 
-## Step 1 — Run models
+## Step 1 — Run models (bounded-context track)
 
-Run after `go`. This is the paid step.
+Run after `go` if the user chose bounded-context (default). This is the
+paid step.
 
 ```bash
 python code_review_benchmark.py runs/<id>/input.diff \
@@ -223,6 +288,47 @@ exact tokens (`OK` / `FAIL`, uppercase) when counting outcomes.
 After completion, summarise inline:
 > "Step 1 done: K of N models returned successfully. Failed: `<list>`.
 > Moving on to step 2 (parsing)."
+
+Then run step 2 immediately, no pause.
+
+## Step 1A — Run models (agentic track)
+
+Run after `go` if the user chose agentic. This is the paid step.
+
+```bash
+python code_review_benchmark_agent.py \
+  runs/<id>/input.diff \
+  --repo-path <repo-path> \
+  -o runs/<id>/results.json \
+  [--models-file models.agentic.json] \
+  [--prompt prompts/review.agentic.en.txt] \
+  [--max-steps 20] \
+  [--max-cost-per-model 1.0]
+```
+
+**Required:** `--repo-path` must be a git repository containing `.serena/project.yml`.
+The harness will create a temporary git worktree on the detected commit,
+copy `.serena/project.yml` into it, start Serena MCP, and run the agent loop.
+
+**Expected artefacts on success:**
+
+- `runs/<id>/results.json` — metadata + per-model results with agentic fields
+  (`tool_calls`, `steps_taken`, `halt_reason`)
+- `runs/<id>/results/<model>.md` — one markdown file per model
+- `runs/<id>/run.agentic.log` — harness log (Serena version, curated tools, etc.)
+- `runs/<id>/<model>.trace.jsonl` — per-step trace (tool, args, latency)
+
+**Agentic-specific halt reasons to report:**
+- `completed` — normal finish after at least one tool call
+- `single_shot_with_findings` — model never used tools but produced findings
+- `silent_refusal` — model never used tools and produced zero findings
+- `step_budget` — hit `--max-steps` (default 20)
+- `cost_budget` — hit `--max-cost-per-model` (default $1.00)
+- `tool_call_parse_error` — model emitted malformed tool-call JSON
+
+After completion, summarise inline:
+> "Step 1A done: K of N models returned successfully. Agentic halt reasons:
+> `<list>`. Moving on to step 2 (parsing)."
 
 Then run step 2 immediately, no pause.
 
@@ -424,12 +530,15 @@ human writeup.
 
 - `README.md` — the full pipeline picture, mermaid diagram, and the
   expanded prose for steps 3 and 5 (clustering and adjudication).
-- `CONTRIBUTING.md` — how to add a model to `models.json`, how to tweak
-  the parser regexes (`ISSUE_RE`), and the format-compliance notes
+- `docs/plans/2026-05-09-agentic-track.md` — design doc for the agentic
+  harness: architecture, curated tool set, stop conditions, risks.
+- `CONTRIBUTING.md` — how to add a model to `models.json` / `models.agentic.json`,
+  how to tweak the parser regexes (`ISSUE_RE`), and the format-compliance notes
   mechanism (`FORMAT_NOTES`).
 - `prompts/cluster.en.txt`, `prompts/judge.en.txt` — the rubrics that the
   pause-step delegations refer to. Edit before running on a new
   codebase.
+- `prompts/review.agentic.en.txt` — the agentic track reviewer prompt.
 - `templates/findings_report.template.md` — the skeleton step 7 fills in.
 - `cost_estimates.json` — documented override for `usage.cost == null`
   (models routed outside OpenRouter).
